@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@types/three": "^0.160.0",
     "opencascade.js": "2.0.0-beta.b5ff984",
     "svelte-check": "^4.6.0",
     "typescript": "^6.0.3",
