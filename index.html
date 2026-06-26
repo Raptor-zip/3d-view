@@ -74,7 +74,8 @@
   .welcome .wicon { color:var(--accent); opacity:.9; }
   .welcome .wlogo { margin-top:10px; font-size:20px; font-weight:600; color:var(--fg); letter-spacing:.01em; }
   .welcome .wlead { margin-top:7px; font-size:13px; color:var(--muted); line-height:1.6; }
-  .welcome .wcta { margin:20px auto 0; max-width:230px; font-size:14px; padding:11px; }
+  .welcome .wctarow { display:flex; gap:8px; margin:20px auto 0; max-width:320px; }
+  .welcome .wcta { margin:0; flex:1; font-size:14px; padding:11px; }
   .welcome .wdrop { font-size:12px; color:var(--muted); }
   .welcome .wsample {
     margin-top:12px; background:none; border:none; color:var(--accent);
@@ -135,7 +136,10 @@
         <svg class="wicon" width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z"/><path d="M3 7l9 5 9-5"/><path d="M12 12v10"/></svg>
         <div class="wlogo">3D検証ビューア</div>
         <div class="wlead">3DモデルとG-codeを、ブラウザだけでその場で確認</div>
-        <button class="file wcta" id="heroOpenBtn">ファイルを開く</button>
+        <div class="wctarow">
+          <button class="file wcta" id="heroOpenBtn">ファイルを開く</button>
+          <button class="file wcta" id="heroFolderBtn">フォルダーを開く</button>
+        </div>
         <div class="wdrop">ファイル・フォルダーのドラッグ&amp;ドロップでも読み込めます（複数可）</div>
         <button class="wsample" id="heroSampleBtn">サンプルを表示して試す</button>
         <div class="wprivacy">

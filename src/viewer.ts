@@ -275,8 +275,9 @@ document.getElementById('fileInput')!.onchange = (e)=>{ loadFiles([...(e.target 
 // 「フォルダーを開く」は対応ブラウザではハンドル取得（フォルダーごとに自動更新トグル可）、
 // 非対応ブラウザ(Safari/Firefox)では webkitdirectory による一回読み込みへ自動フォールバックする。
 const WATCH_SUPPORTED = typeof window.showDirectoryPicker === 'function';
-document.getElementById('openFolderBtn')!.onclick = ()=>
-  WATCH_SUPPORTED ? selectBrowserDirectory() : document.getElementById('folderInput')!.click();
+const openFolder = ()=> WATCH_SUPPORTED ? selectBrowserDirectory() : document.getElementById('folderInput')!.click();
+document.getElementById('openFolderBtn')!.onclick = openFolder;
+document.getElementById('heroFolderBtn')!.onclick = openFolder;   // トップ画面のフォルダーCTA
 document.getElementById('folderInput')!.onchange = async (e)=>{
   const files = [...(e.target as HTMLInputElement).files!]; (e.target as HTMLInputElement).value='';
   if(!files.length) return;
