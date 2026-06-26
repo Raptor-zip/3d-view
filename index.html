@@ -104,11 +104,11 @@
     <div class="group">
       <button class="file" id="openBtn">ファイルを開く（複数可）</button>
       <input type="file" id="fileInput" accept=".stl,.step,.stp,.obj,.3mf,.glb,.gltf,.gcode,.json" multiple style="display:none" />
-      <button class="file" id="selectFolderBtn">フォルダーを選択して監視</button>
-      <button class="mini" id="openFolderBtn" style="width:100%">ブラウザからフォルダーを開く（監視なし）</button>
+      <button class="file" id="openFolderBtn">フォルダーを開く（複数可）</button>
       <input type="file" id="folderInput" webkitdirectory directory multiple style="display:none" />
+      <button class="mini" id="selectFolderBtn" style="width:100%;display:none">選択フォルダーを監視（自動更新・Chrome/Edge）</button>
       <div id="folderList"></div>
-      <div id="folderStatus">「フォルダーを選択して監視」でローカルのフォルダーを選ぶと、自動更新します（Chrome/Edge）。</div>
+      <div id="folderStatus">ファイル／フォルダーをドラッグ&amp;ドロップ、または上のボタンで開きます。</div>
     </div>
 
     <div class="group">
@@ -370,7 +370,14 @@ const nextFrame = ()=> new Promise(r=> requestAnimationFrame(()=> requestAnimati
 
 document.getElementById('openBtn').onclick = ()=> document.getElementById('fileInput').click();
 document.getElementById('fileInput').onchange = (e)=>{ loadFiles([...e.target.files]); e.target.value=''; };
-document.getElementById('selectFolderBtn').onclick = ()=> selectBrowserDirectory();
+// 監視（自動更新）は File System Access API 依存で Chrome/Edge のみ。
+// 未対応ブラウザ（Safari/Firefox）では監視ボタンを出さず、「フォルダーを開く（一回）」へ誘導する。
+const WATCH_SUPPORTED = typeof window.showDirectoryPicker === 'function';
+if(WATCH_SUPPORTED){
+  const sf = document.getElementById('selectFolderBtn');
+  sf.style.display = '';
+  sf.onclick = ()=> selectBrowserDirectory();
+}
 document.getElementById('openFolderBtn').onclick = ()=> document.getElementById('folderInput').click();
 document.getElementById('folderInput').onchange = async (e)=>{
   const files = [...e.target.files]; e.target.value='';
@@ -625,7 +632,9 @@ function updateBrowserDirectoryStatus(){
   const total = entries.reduce((sum, entry)=> sum + (entry.modelCount || 0), 0);
   renderBrowserDirectoryList();
   if(!entries.length){
-    folderStatus.textContent = '「フォルダーを選択して監視」でローカルのフォルダーを選ぶと、自動更新します（Chrome/Edge）。';
+    folderStatus.textContent = WATCH_SUPPORTED
+      ? 'ファイル／フォルダーをドラッグ&ドロップ、または上のボタンで開きます。「選択フォルダーを監視」なら自動更新します（Chrome/Edge）。'
+      : 'ファイル／フォルダーをドラッグ&ドロップ、または上のボタンで開きます。';
     return;
   }
   folderStatus.textContent = `${entries.length} フォルダー・合計 ${total} 件を表示中。ブラウザが1秒ごとに更新を確認します。`;
