@@ -1,0 +1,25 @@
+{
+  "name": "3d-print-viewer",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "STL/STEP/OBJ/3MF/glTF とG-code(Bambu/Orca)をブラウザで無劣化表示する3D検証ビューア",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "step2glb": "node step2glb.mjs"
+  },
+  "dependencies": {
+    "svelte": "^5.56.3",
+    "three": "^0.160.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "opencascade.js": "2.0.0-beta.b5ff984",
+    "svelte-check": "^4.6.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  }
+}

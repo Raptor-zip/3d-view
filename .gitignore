@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.vite/
+__pycache__/
+# step2glb.mjs が生成する変換成果物(再生成可能・巨大)。手置きアセットは別途残す。
+public/*.glb
+*.glb
