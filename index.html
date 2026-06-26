@@ -7,7 +7,7 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 <title>3D検証ビューア — STL / STEP / OBJ / 3MF / glTF</title>
 <style>
-  :root { --bg:#1a1c20; --panel:#24272e; --fg:#e6e8eb; --muted:#9aa0a8; --accent:#4f9cff; --line:#3a3e46; }
+  :root { --bg:#1a1c20; --panel:#24272e; --fg:#e6e8eb; --muted:#9aa0a8; --accent:#4f9cff; --line:#3a3e46; --ok:#5fd29a; }
   * { box-sizing: border-box; }
   html, body { margin:0; height:100%; font-family: system-ui, "Hiragino Sans", "Noto Sans JP", sans-serif; background:var(--bg); color:var(--fg); overflow:hidden; }
   #app { display:flex; height:100%; }
@@ -57,8 +57,28 @@
   #drop.show { display:flex; }
   #hint {
     position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
-    color:var(--muted); text-align:center; pointer-events:none; line-height:1.8;
+    width:min(440px, 86vw); pointer-events:none;
   }
+  .welcome {
+    pointer-events:auto; text-align:center;
+    background:linear-gradient(180deg,#262a32,#21242b);
+    border:1px solid var(--line); border-radius:14px;
+    padding:30px 28px 24px; box-shadow:0 12px 44px rgba(0,0,0,.38);
+  }
+  .welcome .wlogo { font-size:20px; font-weight:600; color:var(--fg); letter-spacing:.01em; }
+  .welcome .wlead { margin-top:8px; font-size:13px; color:var(--muted); line-height:1.65; }
+  .welcome .wprivacy {
+    display:inline-flex; align-items:center; gap:8px; margin:18px 0 2px; text-align:left;
+    background:rgba(95,210,154,.10); border:1px solid rgba(95,210,154,.38);
+    color:var(--ok); border-radius:12px; padding:9px 13px; font-size:12px; font-weight:500; line-height:1.5;
+  }
+  .welcome .wcta { margin:18px auto 0; max-width:220px; font-size:14px; padding:11px; }
+  .welcome .wdrop { font-size:12px; color:var(--muted); }
+  .welcome .wformats {
+    margin-top:18px; padding-top:14px; border-top:1px solid var(--line);
+    font-size:11px; color:var(--fg); letter-spacing:.05em; opacity:.85;
+  }
+  .welcome .wnote { margin-top:8px; font-size:10.5px; color:var(--muted); line-height:1.75; }
   #busy {
     position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
     background:rgba(0,0,0,.72); padding:18px 26px; border-radius:10px; font-size:13px;
@@ -98,7 +118,20 @@
 <div id="app">
   <div id="view">
     <div id="drop">ここにドロップして読み込み（複数可）</div>
-    <div id="hint">STL / STEP / STP / OBJ / 3MF / glTF / GLB / G-code を<br>ドラッグ&amp;ドロップ（複数可）、または「ファイルを開く」<br><span style="font-size:11px">メッシュは無劣化表示／G-codeはツールパスを描画<br>（STEPはブラウザ内で色付き解析。初回のみCADエンジン~13MB取得）</span></div>
+    <div id="hint">
+      <div class="welcome">
+        <div class="wlogo">3D検証ビューア</div>
+        <div class="wlead">STL・STEP・OBJ・3MF・glTF・G-code を<br>ブラウザだけで表示・検証できます</div>
+        <div class="wprivacy">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <span>ファイルはアップロードされません。すべてこの端末のブラウザ内で処理します。</span>
+        </div>
+        <button class="file wcta" id="heroOpenBtn">ファイルを開く</button>
+        <div class="wdrop">またはウィンドウへドラッグ&amp;ドロップ（複数可）</div>
+        <div class="wformats">STL / STEP / STP / OBJ / 3MF / glTF / GLB / G-code</div>
+        <div class="wnote">メッシュは無劣化表示／G-codeはツールパスを描画。<br>STEP はブラウザ内で色付き解析（初回のみ CADエンジン ~13MB を取得）。</div>
+      </div>
+    </div>
     <div id="busy"><div class="spinner"></div><span id="busyText">読み込み中…</span></div>
     <div id="axisHint">赤=X　緑=Y　青=Z</div>
     <div id="measureHint"></div>
@@ -371,6 +404,7 @@ const showBusy = (s)=>{ busy.classList.toggle('show', !!s); if(s) busyText.textC
 const nextFrame = ()=> new Promise(r=> requestAnimationFrame(()=> requestAnimationFrame(r)));
 
 document.getElementById('openBtn').onclick = ()=> document.getElementById('fileInput').click();
+document.getElementById('heroOpenBtn').onclick = ()=> document.getElementById('fileInput').click();
 document.getElementById('fileInput').onchange = (e)=>{ loadFiles([...e.target.files]); e.target.value=''; };
 // 監視（自動更新）は File System Access API 依存で Chrome/Edge のみ。
 // 未対応ブラウザ（Safari/Firefox）では監視ボタンを出さず、「フォルダーを開く（一回）」へ誘導する。
