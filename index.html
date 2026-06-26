@@ -79,6 +79,8 @@
   .folderItem { display:flex; align-items:center; gap:7px; padding:5px 7px; background:#2a2e35; border:1px solid var(--line); border-radius:5px; }
   .folderItem .fi-name { font-size:12px; color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
   .folderItem .fi-count { font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums; flex-shrink:0; }
+  .folderItem .fi-watch { display:flex; align-items:center; gap:3px; font-size:11px; color:var(--muted); cursor:pointer; flex-shrink:0; user-select:none; }
+  .folderItem .fi-watch input { margin:0; cursor:pointer; }
   .folderItem .fi-stop { background:transparent; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:2px 7px; font-size:11px; cursor:pointer; flex-shrink:0; }
   .folderItem .fi-stop:hover { background:#5a2a2a; color:#ff9b9b; border-color:#7a3a3a; }
   /* G-code 凡例 */
@@ -106,7 +108,6 @@
       <input type="file" id="fileInput" accept=".stl,.step,.stp,.obj,.3mf,.glb,.gltf,.gcode,.json" multiple style="display:none" />
       <button class="file" id="openFolderBtn">フォルダーを開く（複数可）</button>
       <input type="file" id="folderInput" webkitdirectory directory multiple style="display:none" />
-      <button class="mini" id="selectFolderBtn" style="width:100%;display:none">選択フォルダーを監視（自動更新・Chrome/Edge）</button>
       <div id="folderList"></div>
       <div id="folderStatus">ファイル／フォルダーをドラッグ&amp;ドロップ、または上のボタンで開きます。</div>
     </div>
@@ -372,13 +373,12 @@ document.getElementById('openBtn').onclick = ()=> document.getElementById('fileI
 document.getElementById('fileInput').onchange = (e)=>{ loadFiles([...e.target.files]); e.target.value=''; };
 // 監視（自動更新）は File System Access API 依存で Chrome/Edge のみ。
 // 未対応ブラウザ（Safari/Firefox）では監視ボタンを出さず、「フォルダーを開く（一回）」へ誘導する。
+// 自動更新（1秒ポーリング）は File System Access API の永続ハンドルが要る＝Chrome/Edge のみ。
+// 「フォルダーを開く」は対応ブラウザではハンドル取得（フォルダーごとに自動更新トグル可）、
+// 非対応ブラウザ(Safari/Firefox)では webkitdirectory による一回読み込みへ自動フォールバックする。
 const WATCH_SUPPORTED = typeof window.showDirectoryPicker === 'function';
-if(WATCH_SUPPORTED){
-  const sf = document.getElementById('selectFolderBtn');
-  sf.style.display = '';
-  sf.onclick = ()=> selectBrowserDirectory();
-}
-document.getElementById('openFolderBtn').onclick = ()=> document.getElementById('folderInput').click();
+document.getElementById('openFolderBtn').onclick = ()=>
+  WATCH_SUPPORTED ? selectBrowserDirectory() : document.getElementById('folderInput').click();
 document.getElementById('folderInput').onchange = async (e)=>{
   const files = [...e.target.files]; e.target.value='';
   if(!files.length) return;
@@ -600,7 +600,7 @@ async function syncBrowserDirectory(entry){
   }
 }
 const folderList = document.getElementById('folderList');
-// 監視を解除：タイマーを止め、そのフォルダー由来のモデルを全て撤去してから一覧から外す。
+// フォルダーを取り除く：タイマーを止め、そのフォルダー由来のモデルを全て撤去してから一覧から外す。
 function stopBrowserDirectory(entry){
   if(entry.timer){ clearInterval(entry.timer); entry.timer = null; }
   for(const sourceKey of entry.files.keys()){
@@ -608,6 +608,17 @@ function stopBrowserDirectory(entry){
     if(old) removeModel(old);
   }
   browserDirectories.delete(entry.id);
+  updateBrowserDirectoryStatus();
+}
+// 自動更新（1秒ポーリング）のON/OFFをフォルダー単位で切り替える。OFFでもモデルは表示したまま。
+function setBrowserDirectoryWatch(entry, on){
+  entry.watch = on;
+  if(on){
+    if(!entry.timer) entry.timer = setInterval(()=> syncBrowserDirectory(entry), 1000);
+    syncBrowserDirectory(entry);   // ONにした瞬間に一度だけ取り込む
+  } else if(entry.timer){
+    clearInterval(entry.timer); entry.timer = null;
+  }
   updateBrowserDirectoryStatus();
 }
 function renderBrowserDirectoryList(){
@@ -620,10 +631,17 @@ function renderBrowserDirectoryList(){
     name.className = 'fi-name'; name.textContent = entry.handle.name; name.title = entry.handle.name;
     const count = document.createElement('span');
     count.className = 'fi-count'; count.textContent = `${entry.modelCount || 0}件`;
+    const watch = document.createElement('label');
+    watch.className = 'fi-watch'; watch.title = `「${entry.handle.name}」を1秒ごとに自動更新`;
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = entry.watch !== false;
+    cb.onchange = ()=> setBrowserDirectoryWatch(entry, cb.checked);
+    const wlabel = document.createElement('span'); wlabel.textContent = '自動更新';
+    watch.append(cb, wlabel);
     const stop = document.createElement('button');
-    stop.className = 'fi-stop'; stop.textContent = '監視解除'; stop.title = `「${entry.handle.name}」の監視を解除`;
+    stop.className = 'fi-stop'; stop.textContent = '削除'; stop.title = `「${entry.handle.name}」と由来モデルを取り除く`;
     stop.onclick = ()=> stopBrowserDirectory(entry);
-    row.append(name, count, stop);
+    row.append(name, count, watch, stop);
     folderList.append(row);
   }
 }
@@ -633,15 +651,19 @@ function updateBrowserDirectoryStatus(){
   renderBrowserDirectoryList();
   if(!entries.length){
     folderStatus.textContent = WATCH_SUPPORTED
-      ? 'ファイル／フォルダーをドラッグ&ドロップ、または上のボタンで開きます。「選択フォルダーを監視」なら自動更新します（Chrome/Edge）。'
+      ? 'ファイル／フォルダーをドラッグ&ドロップ、または上のボタンで開きます。開いたフォルダーは既定で自動更新（行ごとにオフ可）。'
       : 'ファイル／フォルダーをドラッグ&ドロップ、または上のボタンで開きます。';
     return;
   }
-  folderStatus.textContent = `${entries.length} フォルダー・合計 ${total} 件を表示中。ブラウザが1秒ごとに更新を確認します。`;
+  const watching = entries.filter(entry=> entry.watch !== false).length;
+  folderStatus.textContent = watching
+    ? `${entries.length} フォルダー・合計 ${total} 件を表示中（${watching} フォルダーを1秒ごとに自動更新）。`
+    : `${entries.length} フォルダー・合計 ${total} 件を表示中（自動更新オフ）。`;
 }
 async function selectBrowserDirectory(){
   if(!window.showDirectoryPicker){
-    folderStatus.textContent = 'このブラウザは監視付きフォルダー選択に未対応です。「ブラウザからフォルダーを開く」を使ってください。';
+    // 通常はボタン側で振り分けるため到達しないが、安全のため一回読み込みへフォールバック。
+    folderStatus.textContent = 'このブラウザは自動更新に未対応です。フォルダーを一回読み込みます。';
     document.getElementById('folderInput').click();
     return;
   }
@@ -653,7 +675,7 @@ async function selectBrowserDirectory(){
         return;
       }
     }
-    const entry = { id:++browserDirectorySequence, handle, files:new Map(), modelCount:0, syncing:false, timer:null };
+    const entry = { id:++browserDirectorySequence, handle, files:new Map(), modelCount:0, syncing:false, timer:null, watch:true };
     browserDirectories.set(entry.id, entry);
     showBusy(`フォルダーを読み込み中… ${handle.name}`);
     await syncBrowserDirectory(entry);
