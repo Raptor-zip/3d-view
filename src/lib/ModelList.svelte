@@ -4,6 +4,10 @@
   function setVisible(model: ModelCard, event: Event) {
     dispatchModelAction(model.id, 'set-visible', (event.currentTarget as HTMLInputElement).checked);
   }
+
+  function setOpacity(model: ModelCard, event: Event) {
+    dispatchModelAction(model.id, 'set-opacity', Number((event.currentTarget as HTMLInputElement).value) / 100);
+  }
 </script>
 
 {#if $modelCards.length === 0}
@@ -40,6 +44,16 @@
             {/each}
           </div>
         </div>
+        {#if !model.isGcode}
+          <label class="opacity-row" title="このモデルの不透明度">
+            <span>不透明度</span>
+            <input
+              type="range" min="5" max="100" step="5" value={Math.round(model.opacity * 100)}
+              oninput={(event) => setOpacity(model, event)}
+            />
+            <b>{Math.round(model.opacity * 100)}%</b>
+          </label>
+        {/if}
       </div>
     {/each}
   </div>
@@ -61,6 +75,16 @@
   .body { display: flex; gap: 9px; align-items: flex-start; margin-top: 6px; }
   .body :global(.meta) { flex: 1; min-width: 0; margin-top: 0; }
   .wide { grid-column: 1 / -1; }
+
+  .opacity-row {
+    display: flex; align-items: center; gap: 7px; margin-top: 7px;
+    font-size: 11px; color: var(--muted); cursor: pointer;
+  }
+  .opacity-row input { flex: 1; min-width: 0; }
+  .opacity-row b {
+    color: var(--fg); font-weight: 500; font-variant-numeric: tabular-nums;
+    width: 34px; text-align: right;
+  }
 
   .thumb {
     flex-shrink: 0;

@@ -33,6 +33,7 @@
     padding:5px 8px; font-size:12px; cursor:pointer;
   }
   button.mini:hover { background:#3c414a; }
+  button.mini.active { background:var(--accent); color:#fff; border-color:var(--accent); }
   .btnrow { display:flex; gap:6px; flex-wrap:wrap; }
   select { background:#33373f; color:var(--fg); border:1px solid var(--line); border-radius:5px; padding:4px; }
 
@@ -184,6 +185,24 @@
           <option value="center">中心を揃える</option>
         </select>
       </label>
+    </div>
+
+    <div class="group">
+      <h2>部品の調整 <span id="gizmoName" style="color:var(--muted);text-transform:none;letter-spacing:0"></span></h2>
+      <div class="btnrow" style="margin-bottom:8px">
+        <button class="mini" id="gizMove">移動</button>
+        <button class="mini" id="gizRotate">回転</button>
+        <button class="mini" id="gizOff">解除</button>
+      </div>
+      <label class="row"><span>スナップ（1mm / 15°）</span><input type="checkbox" id="gizSnap" checked></label>
+      <label class="row"><span>座標空間</span>
+        <select id="gizSpace">
+          <option value="world">ワールド</option>
+          <option value="local">ローカル（部品基準）</option>
+        </select>
+      </label>
+      <button class="mini" id="gizReset" style="width:100%">選択部品の移動・回転をリセット</button>
+      <div id="gizHint" style="color:var(--muted);font-size:11px;margin-top:6px">モデルを選択してから「移動」か「回転」を押すとギズモが出ます。</div>
     </div>
 
     <div class="group">

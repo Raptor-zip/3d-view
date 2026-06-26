@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
@@ -109,6 +110,10 @@ interface Model {
   sourceKey?: string;
   sourceUrl?: string;
   mtime?: number | null;   // ファイル更新日時（epoch ms）
+  opacity?: number;        // 部品ごとの不透明度（0..1、既定1）
+  basePos?: THREE.Vector3; // レイアウトで決まる基準位置
+  userPos?: THREE.Vector3; // 手動移動オフセット（基準位置に加算）
+  userRot?: THREE.Euler;   // 手動回転
   // メッシュモデル専用
   mesh?: THREE.Mesh;
   wire?: THREE.LineSegments | null | false;
@@ -258,7 +263,77 @@ function setSelectedModel(id: number | null){
   selectedModelId = id;
   selectedModelIdStore.set(id);
   updateModelDecorations();
+  attachGizmo();   // 選択に追従して移動/回転ギズモを付け替える
 }
+
+// ---------- 部品の調整（移動・回転ギズモ） ----------
+const tcontrols = new TransformControls(camera, renderer.domElement);
+tcontrols.setTranslationSnap(1);                          // 1mm スナップ
+tcontrols.setRotationSnap(THREE.MathUtils.degToRad(15));  // 15° スナップ
+tcontrols.setSpace('world');
+scene.add(tcontrols as unknown as THREE.Object3D);
+let gizmoMode: 'translate' | 'rotate' | null = null;
+
+// ドラッグ中はオービット操作を止め、終了時にグリッド/断面範囲を更新
+tcontrols.addEventListener('dragging-changed', (e: { value: unknown })=>{
+  const dragging = !!e.value;
+  controls.enabled = !dragging;
+  if(!dragging) relayout();
+});
+// ギズモで動かした結果を、レイアウト基準位置からのオフセットとして記録
+tcontrols.addEventListener('objectChange', ()=>{
+  const m = models.find(x=> x.id===selectedModelId);
+  if(!m) return;
+  const base = m.basePos ?? new THREE.Vector3();
+  m.userPos = m.group.position.clone().sub(base);
+  m.userRot = m.group.rotation.clone();
+});
+
+// 基準位置(=レイアウト)に手動オフセット/回転を載せて反映
+function applyUserTransform(m: Model){
+  const b = m.basePos ?? new THREE.Vector3();
+  const u = m.userPos ?? new THREE.Vector3();
+  m.group.position.set(b.x+u.x, b.y+u.y, b.z+u.z);
+  if(m.userRot) m.group.rotation.copy(m.userRot); else m.group.rotation.set(0,0,0);
+}
+function setBasePos(m: Model, x: number, y: number, z: number){
+  m.basePos = new THREE.Vector3(x,y,z);
+  applyUserTransform(m);
+}
+function attachGizmo(){
+  const m = gizmoMode ? models.find(x=> x.id===selectedModelId) : undefined;
+  if(m) { tcontrols.setMode(gizmoMode!); tcontrols.attach(m.group); }
+  else tcontrols.detach();
+  updateGizmoUI();
+}
+function setGizmoMode(mode: 'translate' | 'rotate' | null){ gizmoMode = mode; attachGizmo(); }
+function updateGizmoUI(){
+  const m = models.find(x=> x.id===selectedModelId);
+  document.getElementById('gizmoName')!.textContent = m ? m.name : '';
+  for(const [id, mode] of [['gizMove','translate'],['gizRotate','rotate']] as const){
+    document.getElementById(id)!.classList.toggle('active', gizmoMode===mode);
+  }
+  const hint = document.getElementById('gizHint')!;
+  hint.textContent = !m ? 'モデルを選択してから「移動」か「回転」を押すとギズモが出ます。'
+    : gizmoMode ? `「${m.name}」を${gizmoMode==='translate'?'移動':'回転'}中。キャンバスのギズモをドラッグ。`
+    : 'モデルを選択中。「移動」か「回転」を押すとギズモが出ます。';
+}
+document.getElementById('gizMove')!.onclick = ()=> setGizmoMode('translate');
+document.getElementById('gizRotate')!.onclick = ()=> setGizmoMode('rotate');
+document.getElementById('gizOff')!.onclick = ()=> setGizmoMode(null);
+document.getElementById('gizReset')!.onclick = ()=>{
+  const m = models.find(x=> x.id===selectedModelId);
+  if(!m) return;
+  m.userPos = undefined; m.userRot = undefined;
+  applyUserTransform(m); relayout();
+};
+(document.getElementById('gizSnap') as HTMLInputElement).onchange = (e)=>{
+  const on = (e.target as HTMLInputElement).checked;
+  tcontrols.setTranslationSnap(on ? 1 : null);
+  tcontrols.setRotationSnap(on ? THREE.MathUtils.degToRad(15) : null);
+};
+(document.getElementById('gizSpace') as HTMLSelectElement).onchange = (e)=>
+  tcontrols.setSpace((e.target as HTMLSelectElement).value as 'world' | 'local');
 
 // ---------- ファイル読み込み ----------
 const busy = document.getElementById('busy')!;
@@ -1430,7 +1505,7 @@ function relayout(){
     const totalW = models.reduce((s,m)=> s + m.size.x, 0) + gap*Math.max(models.length-1,0);
     let x = -totalW/2;
     for(const m of models){
-      m.group.position.set(x + m.size.x/2, 0, zOf(m));
+      setBasePos(m, x + m.size.x/2, 0, zOf(m));
       x += m.size.x + gap;
     }
   } else if(state.layout === 'grid'){
@@ -1440,10 +1515,10 @@ function relayout(){
     const cellY = Math.max(...models.map(m=>m.size.y)) + gap;
     models.forEach((m, index)=>{
       const col = index % columns, row = Math.floor(index / columns);
-      m.group.position.set((col-(columns-1)/2)*cellX, ((rows-1)/2-row)*cellY, zOf(m));
+      setBasePos(m, (col-(columns-1)/2)*cellX, ((rows-1)/2-row)*cellY, zOf(m));
     });
   } else {
-    for(const m of models) m.group.position.set(0, 0, zOf(m));
+    for(const m of models) setBasePos(m, 0, 0, zOf(m));
   }
   // グリッド/クリップ範囲を全体に合わせる
   const overall = overallSize();
@@ -1480,7 +1555,7 @@ function renderList(){
     const mtimeDetail = md ? [{ label:'更新', value:md, wide:true }] : [];
     if(m.isGcode){
       return {
-        id:m.id, name:m.name, isGcode:true, color:hex, visible:m.visible, thumb:m.thumb||null,
+        id:m.id, name:m.name, isGcode:true, color:hex, visible:m.visible, thumb:m.thumb||null, opacity:m.opacity ?? 1,
         details:[
           { label:'レイヤー', value:String(m.nLayers) }, { label:'時間', value:m.header?.printTime||'—' },
           { label:'X', value:m.size.x.toFixed(1) }, { label:'Y', value:m.size.y.toFixed(1) },
@@ -1490,7 +1565,7 @@ function renderList(){
       };
     }
     return {
-      id:m.id, name:m.name, isGcode:false, color:hex, visible:m.visible, thumb:m.thumb||null,
+      id:m.id, name:m.name, isGcode:false, color:hex, visible:m.visible, thumb:m.thumb||null, opacity:m.opacity ?? 1,
       details:[
         { label:'三角形', value:f(m.tri) }, { label:'頂点', value:f(m.vert) },
         { label:'X', value:m.size.x.toFixed(1) }, { label:'Y', value:m.size.y.toFixed(1) },
@@ -1516,6 +1591,11 @@ window.addEventListener('viewer:model-action', (event)=>{
   if(action==='set-visible'){
     m.visible = !!value; setSelectedModel(m.id); applyDisplay(); renderList(); return;
   }
+  if(action==='set-opacity' && !m.isGcode){
+    m.opacity = typeof value==='number' ? value : 1;
+    // ストアの値はユーザーがドラッグ中の値と一致するので、再描画してもスライダーは飛ばない（％表示だけ追従）
+    applyDisplay(); renderList(); return;
+  }
   if(action==='remove') removeModel(m);
 });
 
@@ -1537,8 +1617,11 @@ function applyDisplay(){
     m.mesh!.visible = state.solid || state.normal;
     m.mesh!.material = state.normal ? normalMat : m.mat!;
     m.mat!.clippingPlanes = planes;
-    const transp = state.opacity || ghost;
-    m.mat!.transparent = transp; m.mat!.opacity = ghost ? 0.18 : (state.opacity ? 0.45 : 1.0); m.mat!.depthWrite = !transp;
+    // 全体設定（ゴースト/半透明）と部品ごとの不透明度の、より透明な方を採用
+    const ghostOp = ghost ? 0.18 : (state.opacity ? 0.45 : 1.0);
+    const op = Math.min(ghostOp, m.opacity ?? 1);
+    const transp = op < 1;
+    m.mat!.transparent = transp; m.mat!.opacity = op; m.mat!.depthWrite = !transp;
     if(state.wire) ensureWire(m);
     if(state.edges) ensureEdges(m);
     if(m.wire)  m.wire.visible  = state.wire;
