@@ -65,20 +65,20 @@
     border:1px solid var(--line); border-radius:14px;
     padding:30px 28px 24px; box-shadow:0 12px 44px rgba(0,0,0,.38);
   }
-  .welcome .wlogo { font-size:20px; font-weight:600; color:var(--fg); letter-spacing:.01em; }
-  .welcome .wlead { margin-top:8px; font-size:13px; color:var(--muted); line-height:1.65; }
+  .welcome .wicon { color:var(--accent); opacity:.9; }
+  .welcome .wlogo { margin-top:10px; font-size:20px; font-weight:600; color:var(--fg); letter-spacing:.01em; }
+  .welcome .wlead { margin-top:7px; font-size:13px; color:var(--muted); line-height:1.6; }
+  .welcome .wcta { margin:20px auto 0; max-width:230px; font-size:14px; padding:11px; }
+  .welcome .wdrop { font-size:12px; color:var(--muted); }
   .welcome .wprivacy {
-    display:inline-flex; align-items:center; gap:8px; margin:18px 0 2px; text-align:left;
+    display:inline-flex; align-items:center; gap:8px; margin:18px 0 0; text-align:left;
     background:rgba(95,210,154,.10); border:1px solid rgba(95,210,154,.38);
     color:var(--ok); border-radius:12px; padding:9px 13px; font-size:12px; font-weight:500; line-height:1.5;
   }
-  .welcome .wcta { margin:18px auto 0; max-width:220px; font-size:14px; padding:11px; }
-  .welcome .wdrop { font-size:12px; color:var(--muted); }
   .welcome .wformats {
     margin-top:18px; padding-top:14px; border-top:1px solid var(--line);
-    font-size:11px; color:var(--fg); letter-spacing:.05em; opacity:.85;
+    font-size:11px; color:var(--muted); letter-spacing:.04em;
   }
-  .welcome .wnote { margin-top:8px; font-size:10.5px; color:var(--muted); line-height:1.75; }
   #busy {
     position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
     background:rgba(0,0,0,.72); padding:18px 26px; border-radius:10px; font-size:13px;
@@ -120,16 +120,16 @@
     <div id="drop">ここにドロップして読み込み（複数可）</div>
     <div id="hint">
       <div class="welcome">
+        <svg class="wicon" width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z"/><path d="M3 7l9 5 9-5"/><path d="M12 12v10"/></svg>
         <div class="wlogo">3D検証ビューア</div>
-        <div class="wlead">STL・STEP・OBJ・3MF・glTF・G-code を<br>ブラウザだけで表示・検証できます</div>
+        <div class="wlead">3DモデルとG-codeを、ブラウザだけでその場で確認</div>
+        <button class="file wcta" id="heroOpenBtn">ファイルを開く</button>
+        <div class="wdrop">ドラッグ&amp;ドロップでも読み込めます（複数可）</div>
         <div class="wprivacy">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          <span>ファイルはアップロードされません。すべてこの端末のブラウザ内で処理します。</span>
+          <span>ファイルはアップロードされません。すべて端末内で処理します。</span>
         </div>
-        <button class="file wcta" id="heroOpenBtn">ファイルを開く</button>
-        <div class="wdrop">またはウィンドウへドラッグ&amp;ドロップ（複数可）</div>
-        <div class="wformats">STL / STEP / STP / OBJ / 3MF / glTF / GLB / G-code</div>
-        <div class="wnote">メッシュは無劣化表示／G-codeはツールパスを描画。<br>STEP はブラウザ内で色付き解析（初回のみ CADエンジン ~13MB を取得）。</div>
+        <div class="wformats">STL · STEP · OBJ · 3MF · glTF · GLB · G-code</div>
       </div>
     </div>
     <div id="busy"><div class="spinner"></div><span id="busyText">読み込み中…</span></div>
