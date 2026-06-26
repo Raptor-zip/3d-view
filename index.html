@@ -62,14 +62,26 @@
   .welcome {
     pointer-events:auto; text-align:center;
     background:linear-gradient(180deg,#262a32,#21242b);
-    border:1px solid var(--line); border-radius:14px;
+    border:1.5px dashed var(--line); border-radius:14px;
     padding:30px 28px 24px; box-shadow:0 12px 44px rgba(0,0,0,.38);
+    transition:border-color .15s, box-shadow .15s;
+  }
+  /* ドラッグ中：カード自身もドロップ先として点灯（半透明オーバーレイ越しに見える） */
+  body.dragging .welcome {
+    border-color:var(--accent);
+    box-shadow:0 0 0 3px rgba(79,156,255,.25), 0 12px 44px rgba(0,0,0,.38);
   }
   .welcome .wicon { color:var(--accent); opacity:.9; }
   .welcome .wlogo { margin-top:10px; font-size:20px; font-weight:600; color:var(--fg); letter-spacing:.01em; }
   .welcome .wlead { margin-top:7px; font-size:13px; color:var(--muted); line-height:1.6; }
   .welcome .wcta { margin:20px auto 0; max-width:230px; font-size:14px; padding:11px; }
   .welcome .wdrop { font-size:12px; color:var(--muted); }
+  .welcome .wsample {
+    margin-top:12px; background:none; border:none; color:var(--accent);
+    font-size:12px; cursor:pointer; padding:2px 4px; text-decoration:underline;
+    text-underline-offset:3px; text-decoration-color:rgba(79,156,255,.4);
+  }
+  .welcome .wsample:hover { text-decoration-color:var(--accent); }
   .welcome .wprivacy {
     display:inline-flex; align-items:center; gap:8px; margin:18px 0 0; text-align:left;
     background:rgba(95,210,154,.10); border:1px solid rgba(95,210,154,.38);
@@ -125,6 +137,7 @@
         <div class="wlead">3DモデルとG-codeを、ブラウザだけでその場で確認</div>
         <button class="file wcta" id="heroOpenBtn">ファイルを開く</button>
         <div class="wdrop">ファイル・フォルダーのドラッグ&amp;ドロップでも読み込めます（複数可）</div>
+        <button class="wsample" id="heroSampleBtn">サンプルを表示して試す</button>
         <div class="wprivacy">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           <span>ファイルはアップロードされません。すべて端末内で処理します。</span>
@@ -179,7 +192,7 @@
       <label class="row"><span>半透明</span><input type="checkbox" id="cOpacity"></label>
       <label class="row"><span>グリッド</span><input type="checkbox" id="cGrid" checked></label>
       <label class="row"><span>バウンディングbox</span><input type="checkbox" id="cBox"></label>
-      <label class="row"><span>モデル名ラベル</span><input type="checkbox" id="cLabels" checked></label>
+      <label class="row" id="rowLabels"><span>モデル名ラベル</span><input type="checkbox" id="cLabels" checked></label>
       <label class="row"><span>自動回転</span><input type="checkbox" id="cSpin"></label>
     </div>
 

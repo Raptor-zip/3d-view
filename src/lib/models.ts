@@ -7,7 +7,7 @@ export interface ModelCard {
   color: string;
   visible: boolean;
   thumb: string | null;
-  details: Array<{ label: string; value: string }>;
+  details: Array<{ label: string; value: string; wide?: boolean }>;
 }
 
 export const modelCards = writable<ModelCard[]>([]);

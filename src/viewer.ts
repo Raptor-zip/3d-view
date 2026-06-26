@@ -68,6 +68,7 @@ interface PreviousState {
   index: number;
   id: number;
   selected: boolean;
+  mtime?: number | null;
 }
 interface LoadOptions {
   name?: string;
@@ -75,6 +76,7 @@ interface LoadOptions {
   sourceKey?: string;
   sourceUrl?: string;
   previous?: PreviousState | null;
+  mtime?: number | null;
 }
 interface MeasureStart {
   point: THREE.Vector3;
@@ -106,6 +108,7 @@ interface Model {
   thumb?: string | null;
   sourceKey?: string;
   sourceUrl?: string;
+  mtime?: number | null;   // ファイル更新日時（epoch ms）
   // メッシュモデル専用
   mesh?: THREE.Mesh;
   wire?: THREE.LineSegments | null | false;
@@ -245,7 +248,8 @@ function updateModelDecorations(){
   for(const m of models){
     if(m.selectionBox) m.selectionBox.visible = m.visible && m.id===selectedModelId;
     if(m.label){
-      m.label.visible = state.labels && m.visible;
+      // 名前ラベルは複数モデルの区別が目的。1個のときは不要なので出さない。
+      m.label.visible = state.labels && m.visible && models.length >= 2;
       m.label.material.opacity = selectedModelId==null || m.id===selectedModelId ? 1 : 0.62;
     }
   }
@@ -280,9 +284,20 @@ document.getElementById('folderInput')!.onchange = async (e)=>{
   if(models.length > 1) setLayout('grid', true);
 };
 
+// サンプル表示：ファイルが無くてもワンクリックで操作（回転/陰影/断面/計測等）を試せる。
+// 同梱ファイルを増やさないよう、ブラウザ内で生成したジオメトリを直接読み込む。
+document.getElementById('heroSampleBtn')!.onclick = ()=>{
+  if(models.some(m=> m.sourceKey === 'sample:knot')) return;  // 二重追加を防ぐ
+  const geo = new THREE.TorusKnotGeometry(16, 5, 240, 36);
+  geo.rotateX(Math.PI/2);
+  addModel('サンプル（トーラスノット）', geo, { sourceKey:'sample:knot' });
+};
+
 const drop = document.getElementById('drop')!;
-window.addEventListener('dragover', e=>{ e.preventDefault(); drop.classList.add('show'); });
-window.addEventListener('dragleave', e=>{ if(e.relatedTarget===null) drop.classList.remove('show'); });
+// ドラッグ中はオーバーレイ表示に加え、body.dragging でウェルカムカード枠も点灯させる。
+function setDragging(on: boolean){ drop.classList.toggle('show', on); document.body.classList.toggle('dragging', on); }
+window.addEventListener('dragover', e=>{ e.preventDefault(); setDragging(true); });
+window.addEventListener('dragleave', e=>{ if(e.relatedTarget===null) setDragging(false); });
 // FileSystemEntry（webkitGetAsEntry 由来）を再帰で全ファイルへ展開する。監視非対応ブラウザ用の一回読み込み。
 function readEntryFile(entry: FileSystemFileEntry){
   return new Promise<File>((resolve, reject)=> entry.file(resolve, reject));
@@ -308,7 +323,7 @@ async function collectDroppedEntryFiles(entry: FileSystemEntry): Promise<File[]>
 }
 
 window.addEventListener('drop', async e=>{
-  e.preventDefault(); drop.classList.remove('show');
+  e.preventDefault(); setDragging(false);
   const items = e.dataTransfer?.items ? [...e.dataTransfer.items] : [];
   if(!items.length){   // DataTransferItem 非対応：従来どおり平坦なファイルを読む
     if(e.dataTransfer?.files.length) await loadFiles([...e.dataTransfer.files]);
@@ -358,6 +373,7 @@ async function loadLocalFile(file: File, resultJson: ResultJson | null, options:
   if(ext === 'json') return true;  // result.json は呼び出し側で処理済み
   const mb = (file.size/1048576).toFixed(1);
   const prefix = options.progress ? ` (${options.progress})` : '';
+  const mtime = file.lastModified || null;   // ファイル更新日時（epoch ms）
   showBusy(`読み込み中${prefix}… ${name} (${mb} MB)`);
   await nextFrame();
   try {
@@ -365,7 +381,7 @@ async function loadLocalFile(file: File, resultJson: ResultJson | null, options:
       const parsed = parseGcode(await file.text());
       showBusy(`配置中… ${name}`); await nextFrame();
       const previous = takeSourceState(options.sourceKey);
-      addGcode(name, parsed, resultJson, { sourceKey:options.sourceKey, previous });
+      addGcode(name, parsed, resultJson, { sourceKey:options.sourceKey, previous, mtime });
       return true;
     }
     if(ext === '3mf'){
@@ -376,19 +392,19 @@ async function loadLocalFile(file: File, resultJson: ResultJson | null, options:
         if(ex.weight && !parsed.header.filWeight) parsed.header.filWeight = ex.weight;
         showBusy(`配置中… ${name}`); await nextFrame();
         const previous = takeSourceState(options.sourceKey);
-        addGcode(name, parsed, resultJson || ex.resultJson, { sourceKey:options.sourceKey, previous });
+        addGcode(name, parsed, resultJson || ex.resultJson, { sourceKey:options.sourceKey, previous, mtime });
         return true;
       }
       const geometry = await parseBuffer(buffer, name);
       showBusy(`配置中… ${name}`); await nextFrame();
       const previous = takeSourceState(options.sourceKey);
-      addModel(name, geometry, { sourceKey:options.sourceKey, previous });
+      addModel(name, geometry, { sourceKey:options.sourceKey, previous, mtime });
       return true;
     }
     const geometry = await parseFile(file);
     showBusy(`配置中… ${name}`); await nextFrame();
     const previous = takeSourceState(options.sourceKey);
-    addModel(name, geometry, { sourceKey:options.sourceKey, previous });
+    addModel(name, geometry, { sourceKey:options.sourceKey, previous, mtime });
     return true;
   } catch(err){
     console.error(err);
@@ -426,6 +442,7 @@ function takeSourceState(sourceKey: string | undefined): PreviousState | null {
   const keep = {
     color: old.color, visible: old.visible, curLayer: old.curLayer,
     featVisible: old.featVisible ? new Map(old.featVisible) : null, index:models.indexOf(old), id:old.id, selected:old.id===selectedModelId,
+    mtime: old.mtime,
   };
   removeModel(old);
   return keep;
@@ -441,6 +458,9 @@ async function loadUrl(url: string, options: LoadOptions = {}){
   try {
     const res = await fetch(url, { cache:'no-store' });
     if(!res.ok) throw new Error('HTTP '+res.status);
+    // サーバが Last-Modified を返せば更新日時として使う（無ければ null）
+    const lm = res.headers.get('last-modified');
+    const mtime = lm ? (Date.parse(lm) || null) : null;
     if(name.split('.').pop()!.toLowerCase() === 'gcode'){
       const parsed = parseGcode(await res.text());
       // 同ディレクトリの result.json を試行（無ければ無視）
@@ -450,7 +470,7 @@ async function loadUrl(url: string, options: LoadOptions = {}){
         const r = await fetch(rjUrl, { cache:'no-store' }); if(r.ok) resultJson = await r.json();
       } catch(e){ /* 無くてよい */ }
       const previous = takeSourceState(sourceKey);
-      addGcode(name, parsed, resultJson, { sourceKey, sourceUrl:url, previous });
+      addGcode(name, parsed, resultJson, { sourceKey, sourceUrl:url, previous, mtime });
     } else {
       const ab = await res.arrayBuffer();
       if(name.split('.').pop()!.toLowerCase() === '3mf'){
@@ -459,13 +479,13 @@ async function loadUrl(url: string, options: LoadOptions = {}){
           const parsed = parseGcode(ex.text);
           if(ex.weight && !parsed.header.filWeight) parsed.header.filWeight = ex.weight;
           const previous = takeSourceState(sourceKey);
-          addGcode(name, parsed, ex.resultJson, { sourceKey, sourceUrl:url, previous });
+          addGcode(name, parsed, ex.resultJson, { sourceKey, sourceUrl:url, previous, mtime });
           showBusy(null); return;
         }
       }
       const geometry = await parseBuffer(ab, name);
       const previous = takeSourceState(sourceKey);
-      addModel(name, geometry, { sourceKey, sourceUrl:url, previous });
+      addModel(name, geometry, { sourceKey, sourceUrl:url, previous, mtime });
     }
   } catch(err){
     console.error(err);
@@ -891,6 +911,7 @@ function addModel(name: string, geometry: THREE.BufferGeometry, options: LoadOpt
     name, group, mesh, wire:null, edges:null, box, backface, selectionBox, label, geometry, mat, color, visible:true,
     size, tri:Math.round(tri), vert:geometry.attributes.position.count, vol:signedVolume(geometry),
     sourceKey:options.sourceKey, sourceUrl:options.sourceUrl,
+    mtime:options.mtime ?? options.previous?.mtime ?? null,
   };
   if(options.previous) m.visible = options.previous.visible;
   m.thumb = makeThumbnail(m);
@@ -1130,6 +1151,7 @@ function addGcode(name: string, parsed: ParsedGcode, resultJson: ResultJson | nu
     featVisible:new Map(names.map(n=>[n, options.previous?.featVisible?.get(n) ?? true])),
     header, resultJson, tri:0, vert:0, vol:0,
     sourceKey:options.sourceKey, sourceUrl:options.sourceUrl,
+    mtime:options.mtime ?? options.previous?.mtime ?? null,
   };
   if(options.previous) m.visible = options.previous.visible;
   m.thumb = makeThumbnail(m);
@@ -1440,11 +1462,21 @@ function overallSize(){
 }
 
 // ---------- モデル一覧UI ----------
+// 更新日時（epoch ms）を「YYYY-MM-DD HH:MM」へ。無ければ null。
+function fmtMtime(ms: number | null | undefined){
+  if(!ms) return null;
+  const d = new Date(ms); const p = (n: number)=> String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 function renderList(){
   document.getElementById('mcount')!.textContent = models.length ? `(${models.length})` : '';
+  // 名前ラベルは2個以上のときだけ意味を持つので、トグル行も1個以下では隠す。
+  document.getElementById('rowLabels')!.style.display = models.length >= 2 ? '' : 'none';
   const f = (n: number)=> n.toLocaleString('en-US');
   modelCards.set(models.map((m)=>{
     const hex = '#'+m.color.toString(16).padStart(6,'0');
+    const md = fmtMtime(m.mtime);
+    const mtimeDetail = md ? [{ label:'更新', value:md, wide:true }] : [];
     if(m.isGcode){
       return {
         id:m.id, name:m.name, isGcode:true, color:hex, visible:m.visible, thumb:m.thumb||null,
@@ -1452,6 +1484,7 @@ function renderList(){
           { label:'レイヤー', value:String(m.nLayers) }, { label:'時間', value:m.header?.printTime||'—' },
           { label:'X', value:m.size.x.toFixed(1) }, { label:'Y', value:m.size.y.toFixed(1) },
           { label:'Z', value:m.size.z.toFixed(1) }, { label:'重量', value:m.header?.filWeight?m.header.filWeight.toFixed(1)+'g':'—' },
+          ...mtimeDetail,
         ],
       };
     }
@@ -1461,6 +1494,7 @@ function renderList(){
         { label:'三角形', value:f(m.tri) }, { label:'頂点', value:f(m.vert) },
         { label:'X', value:m.size.x.toFixed(1) }, { label:'Y', value:m.size.y.toFixed(1) },
         { label:'Z', value:m.size.z.toFixed(1) }, { label:'体積', value:(m.vol/1000).toFixed(1)+'cm³' },
+        ...mtimeDetail,
       ],
     };
   }));

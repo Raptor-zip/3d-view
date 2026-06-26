@@ -36,7 +36,7 @@
           {/if}
           <div class="meta">
             {#each model.details as detail}
-              <span>{detail.label} <b>{detail.value}</b></span>
+              <span class:wide={detail.wide}>{detail.label} <b>{detail.value}</b></span>
             {/each}
           </div>
         </div>
@@ -60,6 +60,7 @@
 
   .body { display: flex; gap: 9px; align-items: flex-start; margin-top: 6px; }
   .body :global(.meta) { flex: 1; min-width: 0; margin-top: 0; }
+  .wide { grid-column: 1 / -1; }
 
   .thumb {
     flex-shrink: 0;
