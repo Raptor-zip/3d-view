@@ -353,6 +353,10 @@ const WATCH_SUPPORTED = typeof window.showDirectoryPicker === 'function';
 const openFolder = ()=> WATCH_SUPPORTED ? selectBrowserDirectory() : document.getElementById('folderInput')!.click();
 document.getElementById('openFolderBtn')!.onclick = openFolder;
 document.getElementById('heroFolderBtn')!.onclick = openFolder;   // トップ画面のフォルダーCTA
+
+// モバイル：設定パネル（ドロワー）の開閉
+document.getElementById('panelToggle')!.onclick = ()=> document.body.classList.toggle('panel-open');
+document.getElementById('panelBackdrop')!.onclick = ()=> document.body.classList.remove('panel-open');
 document.getElementById('folderInput')!.onchange = async (e)=>{
   const files = [...(e.target as HTMLInputElement).files!]; (e.target as HTMLInputElement).value='';
   if(!files.length) return;

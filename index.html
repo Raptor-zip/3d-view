@@ -11,11 +11,40 @@
   * { box-sizing: border-box; }
   html, body { margin:0; height:100%; font-family: system-ui, "Hiragino Sans", "Noto Sans JP", sans-serif; background:var(--bg); color:var(--fg); overflow:hidden; }
   #app { display:flex; height:100%; }
-  #view { position:relative; flex:1; }
+  /* min-width:0 が無いと canvas の実寸が flex アイテムの最小幅になり、画面より広がってしまう */
+  #view { position:relative; flex:1; min-width:0; overflow:hidden; }
   canvas { display:block; }
   #panel {
     width:300px; background:var(--panel); border-left:1px solid var(--line);
     padding:14px; overflow-y:auto; font-size:13px; flex-shrink:0;
+  }
+
+  /* モバイル：パネル開閉ボタンと背景（広い画面では非表示） */
+  #panelToggle {
+    display:none; position:fixed; top:10px; right:10px; z-index:60;
+    width:44px; height:44px; border-radius:10px; border:1px solid var(--line);
+    background:rgba(36,39,46,.92); color:var(--fg); cursor:pointer;
+    align-items:center; justify-content:center; box-shadow:0 4px 16px rgba(0,0,0,.4);
+  }
+  #panelBackdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:40; }
+
+  /* スマホ縦・横（狭い画面）：サイドパネルを右からのドロワーに */
+  @media (max-width: 768px) {
+    #panel {
+      position:fixed; top:0; right:0; height:100%; width:min(330px, 86vw);
+      transform:translateX(100%); transition:transform .25s ease; z-index:50;
+      padding-top:56px; box-shadow:-10px 0 34px rgba(0,0,0,.5);
+      overscroll-behavior:contain; -webkit-overflow-scrolling:touch;
+    }
+    body.panel-open #panel { transform:translateX(0); }
+    body.panel-open #panelBackdrop { display:block; }
+    #panelToggle { display:flex; }
+  }
+  /* スマホ横向き（低い画面）：詰めて表示し、ウェルカムカードもはみ出さない */
+  @media (max-height: 480px) {
+    .welcome { padding:16px 22px 14px; }
+    .welcome .wicon { display:none; }
+    .welcome .wlogo { margin-top:0; }
   }
   .group { border-top:1px solid var(--line); padding:12px 0; }
   .group:first-of-type { border-top:none; }
@@ -149,6 +178,10 @@
 </head>
 <body>
 <div id="app">
+  <button id="panelToggle" aria-label="設定パネルの開閉" title="設定パネルの開閉">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="9" cy="8" r="2.4" fill="var(--panel)"/><circle cx="15" cy="16" r="2.4" fill="var(--panel)"/></svg>
+  </button>
+  <div id="panelBackdrop"></div>
   <div id="view">
     <div id="drop">ファイル・フォルダーをここにドロップ（複数可）</div>
     <div id="hint">
