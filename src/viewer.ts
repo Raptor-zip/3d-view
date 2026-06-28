@@ -143,9 +143,15 @@ renderer.localClippingEnabled = true;
 viewEl.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1e6);
-camera.up.set(0,0,1);            // Z-up（CAD/STL慣習に合わせる）
-camera.position.set(120,-120,90);
+// 透視（遠近感あり）と平行（直交＝パース無し）の2台を持ち、camera は今アクティブな方を指す。
+// 切替時に位置・注視点・見かけの大きさを引き継ぐ（setProjection）。
+const PERSP_FOV = 45;
+const perspCamera = new THREE.PerspectiveCamera(PERSP_FOV, 1, 0.01, 1e6);
+const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1e6, 1e6);
+for(const c of [perspCamera, orthoCamera]){ c.up.set(0,0,1); c.position.set(120,-120,90); }   // Z-up（CAD/STL慣習）
+let camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = perspCamera;
+let orthoView = false;
+let orthoHalfH = 100;   // 平行投影の上下半幅（ワールド単位）。ズームは camera.zoom で別管理。
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = false;  // ドラッグ時の慣性アニメを無効化
@@ -493,6 +499,136 @@ async function loadLocalFile(file: File, resultJson: ResultJson | null, options:
   }
 }
 
+// 3MF を自前で解析して単一ジオメトリを返す。three.js の ThreeMFLoader は
+// production 拡張（BambuStudio/OrcaSlicer が使う、メッシュを別ファイル
+// 3D/Objects/*.model に分け <components p:path=...> で参照する形）を解決できず、
+// ジオメトリが空になる。ここでは外部モデル参照を再帰的にたどってメッシュを合成する。
+// 解析できない／メッシュが見つからない場合は null を返し、呼び出し側で従来ローダへ委譲する。
+function parse3mf(buf: ArrayBuffer): THREE.BufferGeometry | null {
+  let files: Record<string, Uint8Array>;
+  try { files = (fflate as any).unzipSync(new Uint8Array(buf)); } catch(e){ return null; }
+  const decoder = new TextDecoder();
+  // zip 内のパス（先頭スラッシュ無し）に正規化して中身を引く
+  const readFile = (path: string)=>{
+    const key = path.replace(/^\//, '');
+    return files[key] ?? files[Object.keys(files).find(k=> k.toLowerCase() === key.toLowerCase()) || ''];
+  };
+
+  // 3MF の transform（4x3, 12要素）を Matrix4 へ。ThreeMFLoader と同じ並びに合わせる。
+  const parseTransform = (s: string | null)=>{
+    const m = new THREE.Matrix4();
+    if(!s) return m;
+    const t = s.trim().split(/\s+/).map(parseFloat);
+    if(t.length < 12 || t.some(Number.isNaN)) return m;
+    m.set(t[0],t[3],t[6],t[9], t[1],t[4],t[7],t[10], t[2],t[5],t[8],t[11], 0,0,0,1);
+    return m;
+  };
+
+  interface ObjData { mesh?: Element; components?: { path?: string; objectid: string; transform: THREE.Matrix4 }[]; }
+  const modelCache = new Map<string, Map<string, ObjData>>();
+  const parseModel = (path: string): Map<string, ObjData> | null =>{
+    const key = path.replace(/^\//, '');
+    if(modelCache.has(key)) return modelCache.get(key)!;
+    const data = readFile(path);
+    if(!data) return null;
+    let doc: Document;
+    try { doc = new DOMParser().parseFromString(decoder.decode(data), 'application/xml'); }
+    catch(e){ return null; }
+    // ブラウザの XML DOM（デフォルト名前空間あり）では子結合子 `>` を使うと
+    // セレクタが要素を拾えないことがある。ThreeMFLoader と同じく結合子無しの
+    // 型セレクタ（局所名一致）だけで走査する。object はトップレベルのみ存在。
+    const objects = new Map<string, ObjData>();
+    for(const obj of Array.from(doc.querySelectorAll('object'))){
+      const id = obj.getAttribute('id'); if(!id) continue;
+      const mesh = obj.querySelector('mesh') as Element | null;
+      const compsNode = obj.querySelector('components');
+      if(compsNode){
+        const components = Array.from(compsNode.querySelectorAll('component')).map(c=>({
+          // p:path は名前空間付き属性。getAttribute('p:path') は環境差があるため両系統を見る。
+          path: c.getAttribute('p:path') || c.getAttributeNS('http://schemas.microsoft.com/3dmanufacturing/production/2015/06','path') || undefined,
+          objectid: c.getAttribute('objectid') || '',
+          transform: parseTransform(c.getAttribute('transform')),
+        }));
+        objects.set(id, { mesh: mesh || undefined, components });
+      } else {
+        objects.set(id, { mesh: mesh || undefined });
+      }
+    }
+    modelCache.set(key, objects);
+    return objects;
+  };
+
+  const positions: number[] = [];
+  const v = new THREE.Vector3();
+  // 1つのメッシュ要素を matrix 適用して positions へ積む（非インデックス三角形列）
+  const emitMesh = (mesh: Element, matrix: THREE.Matrix4)=>{
+    const verts: number[] = [];
+    for(const vert of Array.from(mesh.querySelectorAll('vertex'))){
+      verts.push(+vert.getAttribute('x')!, +vert.getAttribute('y')!, +vert.getAttribute('z')!);
+    }
+    for(const tri of Array.from(mesh.querySelectorAll('triangle'))){
+      for(const a of ['v1','v2','v3'] as const){
+        const i = +tri.getAttribute(a)! * 3;
+        v.set(verts[i], verts[i+1], verts[i+2]).applyMatrix4(matrix);
+        positions.push(v.x, v.y, v.z);
+      }
+    }
+  };
+
+  const seen = new Set<string>();   // path|id の再帰ガード（循環参照対策）
+  const resolve = (modelPath: string, objectId: string, matrix: THREE.Matrix4)=>{
+    const guard = `${modelPath}|${objectId}`;
+    if(seen.has(guard)) return; seen.add(guard);
+    const objects = parseModel(modelPath);
+    const obj = objects?.get(objectId);
+    if(!obj) return;
+    if(obj.components){
+      for(const c of obj.components){
+        const childPath = c.path || modelPath;
+        resolve(childPath, c.objectid, matrix.clone().multiply(c.transform));
+      }
+    }
+    if(obj.mesh) emitMesh(obj.mesh, matrix);
+    seen.delete(guard);
+  };
+
+  // ルート rels から開始パートを得る。無ければ慣習の 3D/3dmodel.model。
+  let rootPath = '3D/3dmodel.model';
+  const rootRels = readFile('_rels/.rels');
+  if(rootRels){
+    try {
+      const rels = new DOMParser().parseFromString(decoder.decode(rootRels), 'application/xml');
+      const node = Array.from(rels.querySelectorAll('Relationship')).find(r=>
+        (r.getAttribute('Type') || '').includes('3dmodel'));
+      const target = node?.getAttribute('Target'); if(target) rootPath = target;
+    } catch(e){ /* 既定パスで続行 */ }
+  }
+  const rootModel = parseModel(rootPath);
+  if(!rootModel) return null;
+
+  // build/item を起点に解決。build が無ければ全オブジェクトを描画対象にする。
+  const rootData = readFile(rootPath);
+  let items: { objectid: string; transform: THREE.Matrix4 }[] = [];
+  try {
+    const doc = new DOMParser().parseFromString(decoder.decode(rootData!), 'application/xml');
+    items = Array.from(doc.querySelectorAll('item')).map(it=>({
+      objectid: it.getAttribute('objectid') || '',
+      transform: parseTransform(it.getAttribute('transform')),
+    }));
+  } catch(e){ /* fallthrough */ }
+  if(!items.length) items = [...rootModel.keys()].map(id=>({ objectid:id, transform:new THREE.Matrix4() }));
+
+  for(const it of items) resolve(rootPath, it.objectid, it.transform);
+
+  if(!positions.length) return null;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+  geometry.computeVertexNormals();
+  // build の item transform はプレート上の絶対座標（例: 128,128,15）になりがちで、
+  // 既存モデルと同様に中心化はせず、addModel 側の配置/グリッドに委ねる。
+  return geometry;
+}
+
 async function parseFile(file: File){
   return parseBuffer(await file.arrayBuffer(), file.name);
 }
@@ -501,7 +637,7 @@ async function parseBuffer(buf: ArrayBuffer, name: string){
   let geometry: THREE.BufferGeometry | null = null, object: THREE.Object3D | null = null;
   if(ext === 'stl')       geometry = new STLLoader().parse(buf);
   else if(ext === 'obj')  object = new OBJLoader().parse(new TextDecoder().decode(buf));
-  else if(ext === '3mf')  object = new ThreeMFLoader().parse(buf);
+  else if(ext === '3mf')  geometry = parse3mf(buf) ?? mergeObject(new ThreeMFLoader().parse(buf));
   else if(ext === 'step' || ext === 'stp') geometry = await loadStep(buf);
   else if(ext === 'glb' || ext === 'gltf') geometry = await loadGltf(buf);
   else throw new Error('未対応の形式: .'+ext);
@@ -1621,6 +1757,10 @@ function applyDisplay(){
     m.mesh!.visible = state.solid || state.normal;
     m.mesh!.material = state.normal ? normalMat : m.mat!;
     m.mat!.clippingPlanes = planes;
+    // 裏面警告ON時は本体を表面のみ描画(FrontSide)にして、重ねた赤BackSideメッシュが
+    // 穴や法線反転で裏面が見える箇所だけを赤く覗かせる。DoubleSideのままだと本体が
+    // 裏面も通常色で描いてしまい赤と深度衝突して出ない。
+    (m.mesh!.material as THREE.Material).side = state.backface ? THREE.FrontSide : THREE.DoubleSide;
     // 全体設定（ゴースト/半透明）と部品ごとの不透明度の、より透明な方を採用
     const ghostOp = ghost ? 0.18 : (state.opacity ? 0.45 : 1.0);
     const op = Math.min(ghostOp, m.opacity ?? 1);
@@ -1837,14 +1977,52 @@ function setView(kind: string){
   const box = overallBox();
   const c = new THREE.Vector3(); box.getCenter(c);
   const r = box.getBoundingSphere(new THREE.Sphere()).radius;
-  const d = r / Math.tan(THREE.MathUtils.degToRad(camera.fov/2)) * 1.3;
+  const d = r / Math.tan(THREE.MathUtils.degToRad(PERSP_FOV/2)) * 1.3;
   const dirs: Record<string, number[]> = { iso:[1,-1,0.8], front:[0,-1,0], top:[0,0.0001,1], right:[1,0,0], fit:[1,-1,0.8] };
   const v = new THREE.Vector3(...((dirs[kind]||dirs.iso) as [number, number, number])).normalize();
   camera.position.copy(c).add(v.multiplyScalar(d));
   controls.target.copy(c);
+  if(orthoView){   // 距離 d で半径 r*1.3 を収める枠に合わせ、ズームは等倍へ戻す
+    orthoHalfH = Math.tan(THREE.MathUtils.degToRad(PERSP_FOV/2)) * d;
+    orthoCamera.zoom = 1; applyOrthoFrustum();
+  }
   controls.update();
 }
 function fitView(){ setView('iso'); }
+
+// 平行投影カメラの錐台を orthoHalfH とアスペクト比から組み直す（ズームは camera.zoom が担当）。
+function applyOrthoFrustum(){
+  const aspect = (viewEl.clientWidth || 1) / (viewEl.clientHeight || 1);
+  orthoCamera.top = orthoHalfH; orthoCamera.bottom = -orthoHalfH;
+  orthoCamera.left = -orthoHalfH * aspect; orthoCamera.right = orthoHalfH * aspect;
+  orthoCamera.updateProjectionMatrix();
+}
+// 透視⇔平行を切り替える。位置・注視点・見かけの大きさを保ったまま入れ替える。
+function setProjection(toOrtho: boolean){
+  if(toOrtho === orthoView) return;
+  const target = controls.target;
+  const dir = new THREE.Vector3().subVectors(camera.position, target);
+  const dist = dir.length() || 1; dir.normalize();
+  if(toOrtho){
+    // 現在の透視での見かけの大きさ（距離 dist でのビュー半幅）に枠を合わせる
+    orthoHalfH = Math.tan(THREE.MathUtils.degToRad(PERSP_FOV/2)) * dist;
+    orthoCamera.position.copy(camera.position);
+    orthoCamera.zoom = 1; applyOrthoFrustum();
+    camera = orthoCamera;
+  } else {
+    // 平行での実効半幅（orthoHalfH / zoom）と同じ見かけになる距離へ透視カメラを置く
+    const effHalfH = orthoHalfH / orthoCamera.zoom;
+    const newDist = effHalfH / Math.tan(THREE.MathUtils.degToRad(PERSP_FOV/2));
+    perspCamera.position.copy(target).addScaledVector(dir, newDist);
+    camera = perspCamera;
+  }
+  orthoView = toOrtho;
+  controls.object = camera;
+  tcontrols.camera = camera;
+  controls.update();
+}
+(document.getElementById('cOrtho') as HTMLInputElement).addEventListener('change', e=>
+  setProjection((e.target as HTMLInputElement).checked));
 
 // ダブルクリックした点を視点の原点（回転・ズームの中心）にする。クリック先が空なら無視。
 const _recenterRay = new THREE.Raycaster(); _recenterRay.params.Line!.threshold = 0.8;
@@ -1868,7 +2046,9 @@ renderer.domElement.addEventListener('dblclick', (e)=>{
 // ---------- ループ ----------
 function resize(){
   const w = viewEl.clientWidth, h = viewEl.clientHeight;
-  renderer.setSize(w,h); camera.aspect = w/h; camera.updateProjectionMatrix();
+  renderer.setSize(w,h);
+  perspCamera.aspect = w/h; perspCamera.updateProjectionMatrix();
+  applyOrthoFrustum();   // 平行投影の左右枠もアスペクト比に追従
 }
 window.addEventListener('resize', resize); resize();
 
