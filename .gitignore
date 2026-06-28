@@ -5,3 +5,10 @@ __pycache__/
 # step2glb.mjs が生成する変換成果物(再生成可能・巨大)。手置きアセットは別途残す。
 public/*.glb
 *.glb
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
