@@ -32,6 +32,8 @@
     width:300px; background:var(--panel); border-left:1px solid var(--line);
     padding:14px; overflow-y:auto; font-size:13px; flex-shrink:0;
   }
+  /* トップ画面（モデル未読込）：設定対象が無いので右パネルと開閉ボタンを出さない */
+  body.empty #panel, body.empty #panelToggle { display:none; }
 
   /* モバイル：パネル開閉ボタンと背景（広い画面では非表示） */
   #panelToggle {
@@ -167,19 +169,60 @@
     flex-shrink:0;
   }
   @keyframes spin { to { transform:rotate(360deg); } }
-  #axisHint { position:absolute; bottom:10px; left:12px; color:var(--muted); font-size:11px; }
+  #perf {
+    position:absolute; right:10px; bottom:10px; z-index:25; display:none;
+    padding:7px 9px; border-radius:5px; background:rgba(0,0,0,.62);
+    font:11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--fg);
+    pointer-events:none; white-space:pre;
+  }
+  #perf.show { display:block; }
+  #liteNote { color:var(--muted); font-size:10px; line-height:1.45; margin-top:7px; }
   #measureHint { position:absolute; top:12px; left:12px; max-width:300px; padding:7px 9px; border-radius:5px; background:rgba(0,0,0,.62); color:var(--fg); font-size:11px; line-height:1.45; display:none; pointer-events:none; }
   #measureHint.show { display:block; }
   #folderStatus { color:var(--muted); font-size:10px; line-height:1.45; margin-top:7px; word-break:break-all; }
   #folderList { display:flex; flex-direction:column; gap:5px; margin-top:7px; }
   #folderList:empty { display:none; }
-  .folderItem { display:flex; align-items:center; gap:7px; padding:5px 7px; background:#2a2e35; border:1px solid var(--line); border-radius:5px; }
-  .folderItem .fi-name { font-size:12px; color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+  .folderItem { display:flex; flex-wrap:wrap; align-items:center; gap:6px 7px; padding:5px 7px; background:#2a2e35; border:1px solid var(--line); border-radius:5px; }
+  .folderItem .fi-name { font-size:12px; color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1 1 100%; min-width:0; }
   .folderItem .fi-count { font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums; flex-shrink:0; }
   .folderItem .fi-watch { display:flex; align-items:center; gap:3px; font-size:11px; color:var(--muted); cursor:pointer; flex-shrink:0; user-select:none; }
   .folderItem .fi-watch input { margin:0; cursor:pointer; }
+  .folderItem .fi-pick { margin-left:auto; background:transparent; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:2px 7px; font-size:11px; cursor:pointer; flex-shrink:0; }
+  .folderItem .fi-pick:hover { background:#2f3a4a; color:var(--accent); border-color:var(--accent); }
   .folderItem .fi-stop { background:transparent; color:var(--muted); border:1px solid var(--line); border-radius:4px; padding:2px 7px; font-size:11px; cursor:pointer; flex-shrink:0; }
   .folderItem .fi-stop:hover { background:#5a2a2a; color:#ff9b9b; border-color:#7a3a3a; }
+  /* フォルダーのプレビュー選択モーダル */
+  #dirPicker { display:none; position:fixed; inset:0; z-index:70; background:rgba(0,0,0,.6); align-items:center; justify-content:center; padding:20px; }
+  #dirPicker.show { display:flex; }
+  .dp-panel { display:flex; flex-direction:column; width:min(880px,100%); max-height:88vh; background:var(--panel); border:1px solid var(--line); border-radius:10px; box-shadow:0 12px 40px rgba(0,0,0,.5); overflow:hidden; }
+  .dp-head { display:flex; align-items:baseline; gap:10px; padding:14px 16px; border-bottom:1px solid var(--line); }
+  .dp-head .dp-title { font-size:14px; font-weight:600; color:var(--fg); }
+  .dp-head .dp-hsub { font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+  .dp-head .dp-close { margin-left:auto; background:none; border:none; color:var(--muted); font-size:22px; line-height:1; cursor:pointer; padding:0 4px; }
+  .dp-head .dp-close:hover { color:var(--fg); }
+  .dp-tools { display:flex; align-items:center; gap:8px; padding:9px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .dp-tools .dp-tool { background:#33373f; color:var(--fg); border:1px solid var(--line); border-radius:5px; padding:4px 10px; font-size:12px; cursor:pointer; }
+  .dp-tools .dp-tool:hover { border-color:var(--accent); }
+  .dp-tools .dp-tool:disabled { opacity:.45; cursor:not-allowed; border-color:var(--line); }
+  .dp-tools .dp-toolhint { font-size:11px; color:var(--muted); }
+  .dp-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(128px,1fr)); gap:10px; padding:14px 16px; overflow-y:auto; }
+  .dp-card { position:relative; display:flex; flex-direction:column; background:#2a2e35; border:1px solid var(--line); border-radius:7px; padding:8px; cursor:pointer; user-select:none; }
+  .dp-card:hover { border-color:#55606e; }
+  .dp-card.sel { border-color:var(--accent); background:rgba(79,156,255,.12); }
+  .dp-card .dp-check { position:absolute; top:8px; left:8px; width:16px; height:16px; margin:0; cursor:pointer; z-index:1; accent-color:var(--accent); }
+  .dp-thumb { position:relative; aspect-ratio:1/1; border-radius:5px; background:#1e2126; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  .dp-thumb img { width:100%; height:100%; object-fit:contain; }
+  .dp-thumb .dp-noimg { font-size:10px; color:var(--muted); text-align:center; line-height:1.4; white-space:pre-line; }
+  .dp-thumb .dp-spin { width:20px; height:20px; border:2px solid rgba(255,255,255,.18); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+  .dp-name { margin-top:7px; font-size:11px; color:var(--fg); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dp-sub { margin-top:2px; font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .dp-foot { display:flex; align-items:center; gap:10px; padding:12px 16px; border-top:1px solid var(--line); }
+  .dp-foot .dp-count { font-size:12px; color:var(--muted); flex:1; }
+  .dp-foot .dp-cancel { background:#33373f; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:8px 16px; font-size:13px; cursor:pointer; }
+  .dp-foot .dp-cancel:hover { border-color:#55606e; }
+  .dp-foot .dp-ok { background:var(--accent); color:#fff; border:none; border-radius:6px; padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; }
+  .dp-foot .dp-ok:hover { filter:brightness(1.08); }
+  .dp-foot .dp-ok:disabled { opacity:.45; cursor:not-allowed; filter:none; }
   /* G-code 凡例 */
   #gcLegend .leg { display:flex; align-items:center; gap:6px; padding:2px 0; cursor:pointer; font-size:11px; user-select:none; }
   #gcLegend .leg .sw { width:14px; height:8px; border-radius:2px; flex-shrink:0; }
@@ -190,24 +233,24 @@
   #gcStats b { color:var(--fg); font-variant-numeric:tabular-nums; }
 </style>
 </head>
-<body>
+<!-- empty: モデル未読込のトップ画面。右パネルを隠す（viewer.ts の syncEmptyState が同期） -->
+<body class="empty">
 <div id="app">
   <button id="panelToggle" aria-label="設定パネルの開閉" title="設定パネルの開閉">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="9" cy="8" r="2.4" fill="var(--panel)"/><circle cx="15" cy="16" r="2.4" fill="var(--panel)"/></svg>
   </button>
   <div id="panelBackdrop"></div>
   <div id="view">
-    <div id="drop">ファイル・フォルダーをここにドロップ（複数可）</div>
+    <div id="drop">フォルダーをここにドロップ（ファイルのドロップも可）</div>
     <div id="hint">
       <div class="welcome">
         <svg class="wicon" width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7l-9-5Z"/><path d="M3 7l9 5 9-5"/><path d="M12 12v10"/></svg>
         <div class="wlogo">3D検証ビューア</div>
         <div class="wlead">3DモデルとG-codeを、ブラウザだけでその場で確認</div>
         <div class="wctarow">
-          <button class="file wcta" id="heroOpenBtn">ファイルを開く</button>
           <button class="file wcta" id="heroFolderBtn">フォルダーを開く</button>
         </div>
-        <div class="wdrop">ファイル・フォルダーのドラッグ&amp;ドロップでも読み込めます（複数可）</div>
+        <div class="wdrop">フォルダーを選び、表示したいモデルだけチェックします。ドラッグ&amp;ドロップでも読み込めます。</div>
         <button class="wsample" id="heroSampleBtn">サンプルを表示して試す</button>
         <div class="wprivacy">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -217,17 +260,15 @@
       </div>
     </div>
     <div id="busy"><div class="spinner"></div><span id="busyText">読み込み中…</span></div>
-    <div id="axisHint">赤=X　緑=Y　青=Z</div>
+    <div id="perf" aria-hidden="true"></div>
     <div id="measureHint"></div>
   </div>
   <div id="panel">
     <div class="group">
-      <button class="file" id="openBtn">ファイルを開く（複数可）</button>
-      <input type="file" id="fileInput" accept=".stl,.step,.stp,.obj,.3mf,.glb,.gltf,.gcode,.json" multiple style="display:none" />
-      <button class="file" id="openFolderBtn">フォルダーを開く（複数可）</button>
+      <button class="file" id="openFolderBtn">フォルダーを開く</button>
       <input type="file" id="folderInput" webkitdirectory directory multiple style="display:none" />
       <div id="folderList"></div>
-      <div id="folderStatus">ファイル／フォルダーをドラッグ&amp;ドロップ、または上のボタンで開きます。</div>
+      <div id="folderStatus">フォルダーを開いて、表示するモデルを選びます。</div>
     </div>
 
     <div class="group">
@@ -283,6 +324,17 @@
       <label class="row"><span>バウンディングbox</span><input type="checkbox" id="cBox"></label>
       <label class="row" id="rowLabels"><span>モデル名ラベル</span><input type="checkbox" id="cLabels" checked></label>
       <label class="row"><span>自動回転</span><input type="checkbox" id="cSpin"></label>
+    </div>
+
+    <div class="group">
+      <h2>パフォーマンス</h2>
+      <label class="row" title="重複頂点の統合（無劣化）と、視点操作中だけ解像度を落とす描画。三角形は減らさないので検証値は変わりません。読み込み時の最適化は次に読み込むモデルから適用されます。">
+        <span>軽量表示</span><input type="checkbox" id="cLite" checked>
+      </label>
+      <label class="row" title="FPS・描画三角形数・ドローコール数などを画面右下に表示します。">
+        <span>パフォーマンス表示</span><input type="checkbox" id="cStats">
+      </label>
+      <div id="liteNote">重い形状ほど効きます。検証時は静止させれば常にフル解像度で描画されます。</div>
     </div>
 
     <div class="group">
@@ -358,6 +410,7 @@
   </div>
 </div>
 <div id="toast-root"></div>
+<div id="dirPicker"></div>
 
 <script type="module" src="/src/main.ts"></script>
 <script type="module" src="/src/viewer.ts"></script>

@@ -8,6 +8,21 @@
   function setOpacity(model: ModelCard, event: Event) {
     dispatchModelAction(model.id, 'set-opacity', Number((event.currentTarget as HTMLInputElement).value) / 100);
   }
+
+  function setPartVisible(model: ModelCard, partIndex: number, event: Event) {
+    dispatchModelAction(model.id, 'set-part-visible', {
+      partIndex,
+      visible: (event.currentTarget as HTMLInputElement).checked,
+    });
+  }
+
+  function setAllParts(model: ModelCard, visible: boolean) {
+    dispatchModelAction(model.id, 'set-all-parts-visible', visible);
+  }
+
+  function fmtTri(tri: number) {
+    return tri.toLocaleString('en-US');
+  }
 </script>
 
 {#if $modelCards.length === 0}
@@ -53,6 +68,28 @@
             />
             <b>{Math.round(model.opacity * 100)}%</b>
           </label>
+          {#if model.parts?.length}
+            <div class="parts">
+              <div class="parts-head">
+                <span>部品</span>
+                <button type="button" onclick={() => setAllParts(model, true)}>全表示</button>
+                <button type="button" onclick={() => setAllParts(model, false)}>全非表示</button>
+              </div>
+              <div class="part-list">
+                {#each model.parts as part (part.index)}
+                  <label class:off={!part.visible} class="part-row" title={part.name}>
+                    <input
+                      type="checkbox"
+                      checked={part.visible}
+                      onchange={(event) => setPartVisible(model, part.index, event)}
+                    />
+                    <span>{part.name}</span>
+                    <b>{fmtTri(part.tri)}</b>
+                  </label>
+                {/each}
+              </div>
+            </div>
+          {/if}
         {/if}
       </div>
     {/each}
@@ -85,6 +122,38 @@
     color: var(--fg); font-weight: 500; font-variant-numeric: tabular-nums;
     width: 34px; text-align: right;
   }
+
+  .parts {
+    margin-top: 7px;
+    border-top: 1px solid var(--line);
+    padding-top: 7px;
+  }
+  .parts-head {
+    display: flex; align-items: center; gap: 6px;
+    color: var(--muted); font-size: 11px;
+  }
+  .parts-head span { flex: 1; }
+  .parts-head button {
+    border: 1px solid var(--line); border-radius: 4px; background: #33373f; color: var(--fg);
+    font-size: 10px; padding: 2px 6px; cursor: pointer;
+  }
+  .parts-head button:hover { border-color: var(--accent); }
+  .part-list {
+    margin-top: 5px;
+    display: flex; flex-direction: column; gap: 3px;
+    max-height: 128px; overflow: auto; padding-right: 2px;
+  }
+  .part-row {
+    display: grid; grid-template-columns: 16px minmax(0,1fr) auto; align-items: center; gap: 5px;
+    font-size: 11px; color: var(--fg); cursor: pointer;
+  }
+  .part-row input { margin: 0; }
+  .part-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .part-row b {
+    color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums;
+    font-size: 10px;
+  }
+  .part-row.off { opacity: .48; }
 
   .thumb {
     flex-shrink: 0;

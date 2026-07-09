@@ -61,6 +61,23 @@ interface LineObj {
   len: number[];
   pos: Float32Array;
 }
+interface MeshPartRange { start: number; count: number; }
+interface MeshPartSpec {
+  name: string;
+  ranges: MeshPartRange[];
+  tri: number;
+  color?: number;
+}
+interface ParsedMesh {
+  geometry: THREE.BufferGeometry;
+  parts?: MeshPartSpec[];
+}
+interface ModelPart extends MeshPartSpec {
+  visible: boolean;
+  mat: THREE.MeshStandardMaterial;
+  normalMat: THREE.MeshNormalMaterial;
+  backfaceMat: THREE.MeshBasicMaterial;
+}
 interface PreviousState {
   color: number;
   visible: boolean;
@@ -70,6 +87,7 @@ interface PreviousState {
   id: number;
   selected: boolean;
   mtime?: number | null;
+  partVisible: Map<string, boolean> | null;
 }
 interface LoadOptions {
   name?: string;
@@ -78,6 +96,7 @@ interface LoadOptions {
   sourceUrl?: string;
   previous?: PreviousState | null;
   mtime?: number | null;
+  parts?: MeshPartSpec[];
 }
 interface MeasureStart {
   point: THREE.Vector3;
@@ -88,6 +107,7 @@ interface BrowserDirectoryEntry {
   id: number;
   handle: FileSystemDirectoryHandle;
   files: Map<string, string>;
+  selected: Set<string>;   // 表示・監視するモデルの相対パス（プレビュー選択GUIで確定）
   modelCount: number;
   syncing: boolean;
   timer: ReturnType<typeof setInterval> | null;
@@ -110,7 +130,7 @@ interface Model {
   sourceKey?: string;
   sourceUrl?: string;
   mtime?: number | null;   // ファイル更新日時（epoch ms）
-  opacity?: number;        // 部品ごとの不透明度（0..1、既定1）
+  opacity?: number;        // モデルごとの不透明度（0..1、既定1）
   basePos?: THREE.Vector3; // レイアウトで決まる基準位置
   userPos?: THREE.Vector3; // 手動移動オフセット（基準位置に加算）
   userRot?: THREE.Euler;   // 手動回転
@@ -121,6 +141,8 @@ interface Model {
   box?: THREE.Box3Helper;
   backface?: THREE.Mesh;
   mat?: THREE.MeshStandardMaterial;
+  parts?: ModelPart[];
+  flat?: boolean;          // 面法線をシェーダで求める（頂点マージ済み）モデル
   // G-codeモデル専用
   isGcode?: boolean;
   lineObjs?: LineObj[];
@@ -138,8 +160,7 @@ type StateBoolKey = 'solid' | 'wire' | 'edges' | 'normal' | 'backface' | 'opacit
 // ---------- シーン基盤 ----------
 const viewEl = document.getElementById('view')!;
 const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
-renderer.setPixelRatio(window.devicePixelRatio);
-renderer.localClippingEnabled = true;
+renderer.localClippingEnabled = true;   // ピクセル比は resize()/applyPixelRatio() が設定する
 viewEl.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -186,6 +207,8 @@ rebuildGrid(80);
 // ---------- 共有マテリアル ----------
 const clipPlane = new THREE.Plane(new THREE.Vector3(0,0,-1), 0);
 const normalMat = new THREE.MeshNormalMaterial({ side:THREE.DoubleSide });
+// 頂点マージ済み（法線属性を持たない）モデル用。面法線をフラグメントシェーダで求める。
+const flatNormalMat = new THREE.MeshNormalMaterial({ side:THREE.DoubleSide, flatShading:true });
 const backfaceRed = new THREE.MeshBasicMaterial({ color:0xff3b30, side:THREE.BackSide });
 const PALETTE = [0x4f9cff, 0xffb347, 0x7bd88f, 0xff6b9d, 0xb888ff, 0xbfc4cc, 0x57d2d2, 0xe0c84d];
 
@@ -214,6 +237,10 @@ const models: Model[] = [];   // { name, group, mesh, wire, edges, box, backface
 let colorCursor = 0;
 let modelIdCursor = 0;
 const state = { solid:true, wire:false, edges:false, normal:false, backface:false, opacity:false, clip:false, clipFlip:false, box:false, labels:true, layout:'overlay', layoutGap:10 };
+// 軽量表示：無劣化（三角形を減らさない）最適化のみ。読み込み時の頂点マージと、視点操作中の解像度低下。
+let lite = true;
+// オンデマンド描画の要求フレーム数。invalidate() は初期化中のどこからでも呼ばれ得るのでここで宣言する。
+let renderRequests = 1;
 let selectedModelId: number | null = null;
 
 function labelText(name: string){
@@ -265,6 +292,16 @@ function updateModelDecorations(){
     }
   }
 }
+// トップ画面（ウェルカム）とパネルの表示は models の有無から導出する。
+// 読み込み開始時に先回りで隠すと、失敗時に何も無い画面が残るため、成否確定後の同期のみ行う。
+const hintEl = document.getElementById('hint')!;
+function syncEmptyState(){
+  const empty = models.length === 0;
+  hintEl.style.display = empty ? '' : 'none';
+  document.body.classList.toggle('empty', empty);
+  if(empty) document.body.classList.remove('panel-open');   // モバイルのドロワーも閉じる
+}
+
 function setSelectedModel(id: number | null){
   selectedModelId = id;
   selectedModelIdStore.set(id);
@@ -345,11 +382,13 @@ document.getElementById('gizReset')!.onclick = ()=>{
 const busy = document.getElementById('busy')!;
 const busyText = document.getElementById('busyText')!;
 const showBusy = (s: string | null)=>{ busy.classList.toggle('show', !!s); if(s) busyText.textContent = s; };
+
+// 1ファイルの読み込み開始時刻。統計トーストで所要時間を出すためだけに持つ。
+let loadStartAt: number | null = null;
+const markLoadStart = ()=>{ loadStartAt = performance.now(); };
+const loadElapsedSec = ()=> loadStartAt === null ? null : (performance.now() - loadStartAt) / 1000;
 const nextFrame = ()=> new Promise(r=> requestAnimationFrame(()=> requestAnimationFrame(r)));
 
-document.getElementById('openBtn')!.onclick = ()=> document.getElementById('fileInput')!.click();
-document.getElementById('heroOpenBtn')!.onclick = ()=> document.getElementById('fileInput')!.click();
-document.getElementById('fileInput')!.onchange = (e)=>{ loadFiles([...(e.target as HTMLInputElement).files!]); (e.target as HTMLInputElement).value=''; };
 // 監視（自動更新）は File System Access API 依存で Chrome/Edge のみ。
 // 未対応ブラウザ（Safari/Firefox）では監視ボタンを出さず、「フォルダーを開く（一回）」へ誘導する。
 // 自動更新（1秒ポーリング）は File System Access API の永続ハンドルが要る＝Chrome/Edge のみ。
@@ -359,7 +398,6 @@ const WATCH_SUPPORTED = typeof window.showDirectoryPicker === 'function';
 const openFolder = ()=> WATCH_SUPPORTED ? selectBrowserDirectory() : document.getElementById('folderInput')!.click();
 document.getElementById('openFolderBtn')!.onclick = openFolder;
 document.getElementById('heroFolderBtn')!.onclick = openFolder;   // トップ画面のフォルダーCTA
-
 // モバイル：設定パネル（ドロワー）の開閉
 document.getElementById('panelToggle')!.onclick = ()=> document.body.classList.toggle('panel-open');
 document.getElementById('panelBackdrop')!.onclick = ()=> document.body.classList.remove('panel-open');
@@ -441,7 +479,6 @@ window.addEventListener('drop', async e=>{
 });
 
 async function loadFiles(files: File[]){
-  document.getElementById('hint')!.style.display = 'none';
   // バッチ内に result.json があれば gcode の統計として使う
   let resultJson: ResultJson | null = null;
   const rf = files.find(f=> /(^|\/)result\.json$/i.test(f.name) || f.name.toLowerCase()==='result.json');
@@ -461,6 +498,7 @@ async function loadLocalFile(file: File, resultJson: ResultJson | null, options:
   const prefix = options.progress ? ` (${options.progress})` : '';
   const mtime = file.lastModified || null;   // ファイル更新日時（epoch ms）
   showBusy(`読み込み中${prefix}… ${name} (${mb} MB)`);
+  markLoadStart();
   await nextFrame();
   try {
     if(ext === 'gcode'){
@@ -481,16 +519,16 @@ async function loadLocalFile(file: File, resultJson: ResultJson | null, options:
         addGcode(name, parsed, resultJson || ex.resultJson, { sourceKey:options.sourceKey, previous, mtime });
         return true;
       }
-      const geometry = await parseBuffer(buffer, name);
+      const parsedMesh = await parseBufferWithParts(buffer, name);
       showBusy(`配置中… ${name}`); await nextFrame();
       const previous = takeSourceState(options.sourceKey);
-      addModel(name, geometry, { sourceKey:options.sourceKey, previous, mtime });
+      addModel(name, parsedMesh.geometry, { sourceKey:options.sourceKey, previous, mtime, parts:parsedMesh.parts });
       return true;
     }
-    const geometry = await parseFile(file);
+    const parsedMesh = await parseBufferWithParts(await file.arrayBuffer(), name);
     showBusy(`配置中… ${name}`); await nextFrame();
     const previous = takeSourceState(options.sourceKey);
-    addModel(name, geometry, { sourceKey:options.sourceKey, previous, mtime });
+    addModel(name, parsedMesh.geometry, { sourceKey:options.sourceKey, previous, mtime, parts:parsedMesh.parts });
     return true;
   } catch(err){
     console.error(err);
@@ -629,21 +667,158 @@ function parse3mf(buf: ArrayBuffer): THREE.BufferGeometry | null {
   return geometry;
 }
 
+// ---------- 大容量 3MF のストリーミング解析 ----------
+// unzipSync + DOMParser は、展開後の .model が V8 の最大文字列長（約5.4億文字）を超えると
+// TextDecoder が RangeError を投げて破綻する（例: 展開1.75GBの単一モデル）。
+// ここでは圧縮入力をチャンクで流し込み、出力を分割で受けながらタグ単位で走査し、
+// 頂点/三角形を直接 typed array へ展開する。単一 model 内の複数オブジェクト＋build item の
+// transform に対応（外部参照 .model は対象外＝従来の parse3mf/ThreeMFLoader に委ねる）。
+const LARGE_3MF_COMPRESSED = 60 * 1024 * 1024;   // これ超の3mfは危険な一括展開を避けてストリームへ直行
+const TRI_HARD_CAP = 30_000_000;                 // これ超は表示不能としてストリーム解析を中止
+const HEAVY_TRI_WARN = 4_000_000;                // これ超は重い旨を警告（表示は続行）
+
+class GrowF32 { a = new Float32Array(1<<16); n = 0;
+  push(v: number){ if(this.n===this.a.length){ const b=new Float32Array(this.a.length*2); b.set(this.a); this.a=b; } this.a[this.n++]=v; } }
+class GrowU32 { a = new Uint32Array(1<<16); n = 0;
+  push(v: number){ if(this.n===this.a.length){ const b=new Uint32Array(this.a.length*2); b.set(this.a); this.a=b; } this.a[this.n++]=v; } }
+
+async function parse3mfStream(buf: ArrayBuffer): Promise<THREE.BufferGeometry | null> {
+  const u8 = new Uint8Array(buf);
+  // 空白/クオート境界を安全に切るため、属性は先頭スペース付きで探す（pid= と id= の誤取得回避）。
+  const attr = (tag: string, name: string): string | null => {
+    const k = tag.indexOf(' '+name+'="'); if(k<0) return null;
+    const s = k + name.length + 3; const e = tag.indexOf('"', s);
+    return e<0 ? null : tag.slice(s, e);
+  };
+  const num = (tag: string, name: string)=>{ const v = attr(tag, name); return v===null ? NaN : +v; };
+
+  interface Obj { vx: GrowF32; idx: GrowU32; }
+  const objects = new Map<string, Obj>();
+  const items: { objectid: string; transform: string | null }[] = [];
+  let cur: Obj | null = null;
+  let triTotal = 0;
+  let aborted = false;
+
+  const handleTag = (tag: string)=>{
+    const c1 = tag.charCodeAt(1);
+    if(c1===118){ // 'v'
+      if(tag.startsWith('<vertex') && cur){ cur.vx.push(num(tag,'x')); cur.vx.push(num(tag,'y')); cur.vx.push(num(tag,'z')); return; }
+      return;
+    }
+    if(c1===116){ // 't'
+      if(tag.startsWith('<triangle') && !tag.startsWith('<triangles') && cur){
+        cur.idx.push(num(tag,'v1')); cur.idx.push(num(tag,'v2')); cur.idx.push(num(tag,'v3'));
+        if(++triTotal > TRI_HARD_CAP) aborted = true;
+      }
+      return;
+    }
+    if(tag.startsWith('<object')){ const id=attr(tag,'id'); if(id){ cur={ vx:new GrowF32(), idx:new GrowU32() }; objects.set(id, cur); } return; }
+    if(tag.startsWith('<item')){ const objectid=attr(tag,'objectid'); if(objectid) items.push({ objectid, transform:attr(tag,'transform') }); return; }
+  };
+
+  const dec = new TextDecoder('utf-8');
+  let pending = '';
+  const consume = (final: boolean)=>{
+    let i = 0;
+    while(true){
+      const lt = pending.indexOf('<', i);
+      if(lt<0){ i = pending.length; break; }
+      const gt = pending.indexOf('>', lt);
+      if(gt<0){ i = lt; break; }   // 途中で切れたタグ。次チャンクへ持ち越す
+      handleTag(pending.slice(lt, gt+1));
+      i = gt+1;
+      if(aborted) break;
+    }
+    pending = pending.slice(i);
+    void final;
+  };
+
+  const unzip = new (fflate as any).Unzip();
+  unzip.register((fflate as any).UnzipInflate);
+  let streamErr: Error | null = null;
+  unzip.onfile = (file: any)=>{
+    if(!/\.model$/i.test(file.name)) return;   // 対象は 3D/3dmodel.model 等
+    file.ondata = (err: Error | null, chunk: Uint8Array, fin: boolean)=>{
+      if(err){ streamErr = err; return; }
+      if(aborted) return;
+      pending += dec.decode(chunk, { stream: !fin });
+      consume(fin);
+    };
+    file.start();
+  };
+
+  // 圧縮入力をチャンクで push（出力も分割）。数フレームおきに UI へ制御を返す。
+  const CH = 4 << 20;   // 4MB
+  const total = u8.length;
+  for(let off=0; off<total; off+=CH){
+    const end = Math.min(off+CH, total);
+    unzip.push(u8.subarray(off, end), end>=total);
+    if(streamErr || aborted) break;
+    if((off / CH) % 4 === 0){ showBusy(`大容量3MFを解析中… ${Math.round(end/total*100)}%`); await nextFrame(); }
+  }
+  if(streamErr){ console.warn('3MFストリーム展開に失敗', streamErr); return null; }
+  if(aborted){ throw new Error(`三角形が多すぎて表示できません（${TRI_HARD_CAP/1e6}M超）`); }
+
+  // build item（無ければ全オブジェクト）を起点に、transform を適用して非インデックス頂点へ展開。
+  const use = items.length ? items : [...objects.keys()].map(id=>({ objectid:id, transform:null }));
+  let totalTri = 0;
+  for(const it of use){ const o=objects.get(it.objectid); if(o) totalTri += o.idx.n/3; }
+  if(!totalTri) return null;
+  const pos = new Float32Array(totalTri*9);
+  let p = 0;
+  for(const it of use){
+    const o = objects.get(it.objectid); if(!o) continue;
+    const vx = o.vx.a, idx = o.idx.a, ni = o.idx.n;
+    const t = it.transform ? it.transform.trim().split(/\s+/).map(Number) : null;
+    const ident = !t || t.length<12 || (t[0]===1&&t[1]===0&&t[2]===0&&t[3]===0&&t[4]===1&&t[5]===0&&t[6]===0&&t[7]===0&&t[8]===1&&t[9]===0&&t[10]===0&&t[11]===0);
+    for(let k=0;k<ni;k++){
+      const vi = idx[k]*3; let x=vx[vi], y=vx[vi+1], z=vx[vi+2];
+      if(!ident){
+        const nx=t![0]*x+t![3]*y+t![6]*z+t![9], ny=t![1]*x+t![4]*y+t![7]*z+t![10], nz=t![2]*x+t![5]*y+t![8]*z+t![11];
+        x=nx; y=ny; z=nz;
+      }
+      pos[p++]=x; pos[p++]=y; pos[p++]=z;
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geometry.computeVertexNormals();
+  if(totalTri > HEAVY_TRI_WARN){
+    notify(`大きなモデルを読み込みました（三角形 ${(totalTri/1e6).toFixed(1)}M）。\n操作が重くなる場合があります。`, { level:'warning', duration:8000 });
+  }
+  return geometry;
+}
+// 3mf のメッシュ取得。通常は従来の DOM 解析、大容量（またはDOM失敗）ではストリーム解析へ。
+async function parse3mfMesh(buf: ArrayBuffer): Promise<THREE.BufferGeometry | null> {
+  if(buf.byteLength <= LARGE_3MF_COMPRESSED){
+    const g = parse3mf(buf);
+    if(g) return g;
+  }
+  return await parse3mfStream(buf);
+}
+
 async function parseFile(file: File){
   return parseBuffer(await file.arrayBuffer(), file.name);
 }
 async function parseBuffer(buf: ArrayBuffer, name: string){
+  return (await parseBufferWithParts(buf, name)).geometry;
+}
+async function parseBufferWithParts(buf: ArrayBuffer, name: string): Promise<ParsedMesh>{
   const ext = name.split('.').pop()!.toLowerCase();
   let geometry: THREE.BufferGeometry | null = null, object: THREE.Object3D | null = null;
   if(ext === 'stl')       geometry = new STLLoader().parse(buf);
   else if(ext === 'obj')  object = new OBJLoader().parse(new TextDecoder().decode(buf));
-  else if(ext === '3mf')  geometry = parse3mf(buf) ?? mergeObject(new ThreeMFLoader().parse(buf));
-  else if(ext === 'step' || ext === 'stp') geometry = await loadStep(buf);
-  else if(ext === 'glb' || ext === 'gltf') geometry = await loadGltf(buf);
+  else if(ext === '3mf'){
+    geometry = await parse3mfMesh(buf);
+    // 大容量パスで取れなければ ThreeMFLoader は使わない（1.75GB等で確実に破綻するため）。
+    if(!geometry && buf.byteLength <= LARGE_3MF_COMPRESSED) geometry = mergeObject(new ThreeMFLoader().parse(buf));
+  }
+  else if(ext === 'step' || ext === 'stp') return await loadStep(buf);
+  else if(ext === 'glb' || ext === 'gltf') return await loadGltf(buf);
   else throw new Error('未対応の形式: .'+ext);
   if(object && !geometry) geometry = mergeObject(object);
   if(!geometry || !geometry.attributes.position) throw new Error('ジオメトリを取得できませんでした');
-  return geometry;
+  return { geometry };
 }
 
 function sourceKeyFor(url: string){ return new URL(url, location.href).href; }
@@ -659,6 +834,7 @@ function takeSourceState(sourceKey: string | undefined): PreviousState | null {
     color: old.color, visible: old.visible, curLayer: old.curLayer,
     featVisible: old.featVisible ? new Map(old.featVisible) : null, index:models.indexOf(old), id:old.id, selected:old.id===selectedModelId,
     mtime: old.mtime,
+    partVisible: old.parts ? new Map(old.parts.map(part=>[part.name, part.visible])) : null,
   };
   removeModel(old);
   return keep;
@@ -666,7 +842,6 @@ function takeSourceState(sourceKey: string | undefined): PreviousState | null {
 
 // URL(同一オリジンのHTTP配信)からモデルを取得して読み込む。sourceKey が同じ場合は成功後に置換する。
 async function loadUrl(url: string, options: LoadOptions = {}){
-  document.getElementById('hint')!.style.display = 'none';
   const sourceKey = options.sourceKey || sourceKeyFor(url);
   const name = options.name || sourceNameFor(url);
   showBusy(`読み込み中… ${name}`);
@@ -699,9 +874,9 @@ async function loadUrl(url: string, options: LoadOptions = {}){
           showBusy(null); return;
         }
       }
-      const geometry = await parseBuffer(ab, name);
+      const parsedMesh = await parseBufferWithParts(ab, name);
       const previous = takeSourceState(sourceKey);
-      addModel(name, geometry, { sourceKey, sourceUrl:url, previous, mtime });
+      addModel(name, parsedMesh.geometry, { sourceKey, sourceUrl:url, previous, mtime, parts:parsedMesh.parts });
     }
   } catch(err){
     console.error(err);
@@ -747,7 +922,10 @@ async function syncBrowserDirectory(entry: BrowserDirectoryEntry){
         });
       } catch(error){ console.warn(`result.json 解析失敗: ${item.path}`, error); }
     }
-    const modelFiles = found.filter(item=> BROWSER_DIRECTORY_EXTENSIONS.has(item.file.name.split('.').pop()!.toLowerCase()));
+    // 表示対象に選ばれた相対パスのモデルだけを取り込む（フォルダー全体は読み込まない）。
+    const modelFiles = found.filter(item=>
+      BROWSER_DIRECTORY_EXTENSIONS.has(item.file.name.split('.').pop()!.toLowerCase())
+      && entry.selected.has(item.path));
     const next = new Map<string, string>();
     for(const item of modelFiles){
       const sourceKey = browserSourceKey(entry, item.path);
@@ -819,10 +997,13 @@ function renderBrowserDirectoryList(){
     cb.onchange = ()=> setBrowserDirectoryWatch(entry, cb.checked);
     const wlabel = document.createElement('span'); wlabel.textContent = '自動更新';
     watch.append(cb, wlabel);
+    const pick = document.createElement('button');
+    pick.className = 'fi-pick'; pick.textContent = '選び直す'; pick.title = `「${entry.handle.name}」の表示モデルをプレビューから選び直す`;
+    pick.onclick = ()=> reselectBrowserDirectory(entry);
     const stop = document.createElement('button');
     stop.className = 'fi-stop'; stop.textContent = '削除'; stop.title = `「${entry.handle.name}」と由来モデルを取り除く`;
     stop.onclick = ()=> stopBrowserDirectory(entry);
-    row.append(name, count, watch, stop);
+    row.append(name, count, watch, pick, stop);
     folderList.append(row);
   }
 }
@@ -832,24 +1013,28 @@ function updateBrowserDirectoryStatus(){
   renderBrowserDirectoryList();
   if(!entries.length){
     folderStatus.textContent = WATCH_SUPPORTED
-      ? 'ファイル／フォルダーをドラッグ&ドロップ、または上のボタンで開きます。開いたフォルダーは既定で自動更新（行ごとにオフ可）。'
-      : 'ファイル／フォルダーをドラッグ&ドロップ、または上のボタンで開きます。';
+      ? 'フォルダーを開いて、プレビュー一覧から見たいモデルだけを選べます（既定で自動更新・行ごとにオフ可）。'
+      : 'フォルダーを開くか、ファイル／フォルダーをドラッグ&ドロップして読み込めます。';
     return;
   }
   const watching = entries.filter(entry=> entry.watch !== false).length;
   folderStatus.textContent = watching
-    ? `${entries.length} フォルダー・合計 ${total} 件を表示中（${watching} フォルダーを1秒ごとに自動更新）。`
-    : `${entries.length} フォルダー・合計 ${total} 件を表示中（自動更新オフ）。`;
+    ? `${entries.length} フォルダー・選択 ${total} 件を表示中（${watching} フォルダーを1秒ごとに自動更新）。「選び直す」で増減できます。`
+    : `${entries.length} フォルダー・選択 ${total} 件を表示中（自動更新オフ）。「選び直す」で増減できます。`;
 }
 // FileSystemDirectoryHandle を監視対象に登録する。ボタン選択／ドロップの両方から使う。
+// フォルダー全体を読み込むのではなく、プレビュー付きの選択GUIで「見るモデル」を絞ってから取り込む。
 async function addBrowserDirectoryHandle(handle: FileSystemDirectoryHandle){
   for(const entry of browserDirectories.values()){
     if(await handle.isSameEntry(entry.handle)){
-      folderStatus.textContent = `「${handle.name}」はすでに監視中です。`;
+      folderStatus.textContent = `「${handle.name}」はすでに監視中です。行の「選び直す」で表示モデルを変更できます。`;
       return false;
     }
   }
-  const entry: BrowserDirectoryEntry = { id:++browserDirectorySequence, handle, files:new Map(), modelCount:0, syncing:false, timer:null, watch:true };
+  const chosen = await openDirectoryPicker(handle);
+  if(!chosen) return false;             // キャンセル
+  if(!chosen.size){ folderStatus.textContent = `「${handle.name}」は表示モデルが選ばれなかったため開きませんでした。`; return false; }
+  const entry: BrowserDirectoryEntry = { id:++browserDirectorySequence, handle, files:new Map(), selected:chosen, modelCount:0, syncing:false, timer:null, watch:true };
   browserDirectories.set(entry.id, entry);
   showBusy(`フォルダーを読み込み中… ${handle.name}`);
   try {
@@ -860,6 +1045,15 @@ async function addBrowserDirectoryHandle(handle: FileSystemDirectoryHandle){
   } finally {
     showBusy(null);
   }
+}
+// 既存フォルダーの表示モデルを選び直す。選択集合を差し替え、外れたモデルは即座に撤去する。
+async function reselectBrowserDirectory(entry: BrowserDirectoryEntry){
+  const chosen = await openDirectoryPicker(entry.handle, entry.selected);
+  if(!chosen) return;   // キャンセル：現状維持
+  entry.selected = chosen;
+  showBusy(`フォルダーを更新中… ${entry.handle.name}`);
+  try { await syncBrowserDirectory(entry); }
+  finally { showBusy(null); }
 }
 async function selectBrowserDirectory(){
   if(!window.showDirectoryPicker){
@@ -876,6 +1070,332 @@ async function selectBrowserDirectory(){
     console.error(error);
     folderStatus.textContent = `フォルダーを開けませんでした: ${(error as Error).message}`;
   }
+}
+
+// ---------- フォルダーのプレビュー選択GUI ----------
+// フォルダー全体を並べず、まず各ファイルの3Dサムネイルを作り、見たいものだけを選ばせる。
+// サムネイルはメインシーンに触れず、専用のオフスクリーンレンダラ(renderThumb)で1枚撮る。
+const dirPicker = document.getElementById('dirPicker')!;
+let dirPickerToken = 0;   // 開き直すたびに増やし、進行中のサムネ生成を打ち切る印にする
+interface ThumbnailResult { url: string | null; message?: string; }
+const PREVIEW_FULL_PARSE_MAX_BYTES = 12 * 1024 * 1024;      // STL以外を丸ごと読むプレビューの上限
+const PREVIEW_GCODE_MAX_BYTES = 16 * 1024 * 1024;           // G-codeプレビューはテキスト解析なので別上限
+const PREVIEW_STL_SAMPLE_MAX_BYTES = 180 * 1024 * 1024;     // バイナリSTLは間引きプレビューならここまで許可
+const STL_THUMB_TRI_LIMIT = 24_000;                         // フォルダー選択プレビューのSTL最大三角形数
+const GEOMETRY_THUMB_TRI_LIMIT = 48_000;                    // モデル一覧サムネの最大三角形数
+
+function triangleCountOf(geometry: THREE.BufferGeometry){
+  const pos = geometry.getAttribute('position');
+  if(!pos) return 0;
+  return Math.floor((geometry.index ? geometry.index.count : pos.count) / 3);
+}
+function thumbnailGeometryFrom(source: THREE.BufferGeometry, maxTris = GEOMETRY_THUMB_TRI_LIMIT){
+  const pos = source.getAttribute('position');
+  if(!pos) return source;
+  const triCount = triangleCountOf(source);
+  if(triCount <= maxTris) return source;
+  const step = Math.max(1, Math.ceil(triCount / maxTris));
+  const sampleCount = Math.ceil(triCount / step);
+  const idx = source.index;
+  const color = source.getAttribute('color');
+  const normal = source.getAttribute('normal');
+  const outPos = new Float32Array(sampleCount * 9);
+  const outColor = color ? new Float32Array(sampleCount * 9) : null;
+  const outNormal = normal ? new Float32Array(sampleCount * 9) : null;
+  let po = 0, co = 0, no = 0;
+  for(let tri=0; tri<triCount; tri+=step){
+    for(let corner=0; corner<3; corner++){
+      const src = idx ? idx.getX(tri*3 + corner) : tri*3 + corner;
+      outPos[po++] = pos.getX(src); outPos[po++] = pos.getY(src); outPos[po++] = pos.getZ(src);
+      if(color && outColor){
+        outColor[co++] = color.getX(src); outColor[co++] = color.getY(src); outColor[co++] = color.getZ(src);
+      }
+      if(normal && outNormal){
+        outNormal[no++] = normal.getX(src); outNormal[no++] = normal.getY(src); outNormal[no++] = normal.getZ(src);
+      }
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(po === outPos.length ? outPos : outPos.slice(0, po), 3));
+  if(outColor) geometry.setAttribute('color', new THREE.BufferAttribute(co === outColor.length ? outColor : outColor.slice(0, co), 3));
+  if(outNormal) geometry.setAttribute('normal', new THREE.BufferAttribute(no === outNormal.length ? outNormal : outNormal.slice(0, no), 3));
+  if(!outNormal) geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  return geometry;
+}
+function binaryStlTriangleCount(buf: ArrayBuffer){
+  if(buf.byteLength < 84) return null;
+  const tri = new DataView(buf, 80, 4).getUint32(0, true);
+  const expected = 84 + tri * 50;
+  return tri > 0 && expected === buf.byteLength ? tri : null;
+}
+function sampledBinaryStlGeometry(buf: ArrayBuffer, triCount: number, maxTris = STL_THUMB_TRI_LIMIT){
+  const view = new DataView(buf);
+  const step = Math.max(1, Math.ceil(triCount / maxTris));
+  const sampleCount = Math.ceil(triCount / step);
+  const pos = new Float32Array(sampleCount * 9);
+  const normal = new Float32Array(sampleCount * 9);
+  let po = 0, no = 0, hasNormal = false;
+  for(let tri=0; tri<triCount; tri+=step){
+    const base = 84 + tri * 50;
+    if(base + 50 > buf.byteLength) break;
+    const nx = view.getFloat32(base, true), ny = view.getFloat32(base+4, true), nz = view.getFloat32(base+8, true);
+    const useNormal = Number.isFinite(nx) && Number.isFinite(ny) && Number.isFinite(nz) && (nx || ny || nz);
+    const start = po;
+    let ok = true;
+    for(let corner=0; corner<3; corner++){
+      const off = base + 12 + corner * 12;
+      const x = view.getFloat32(off, true), y = view.getFloat32(off+4, true), z = view.getFloat32(off+8, true);
+      if(!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)){ ok = false; break; }
+      pos[po++] = x; pos[po++] = y; pos[po++] = z;
+      normal[no++] = useNormal ? nx : 0; normal[no++] = useNormal ? ny : 0; normal[no++] = useNormal ? nz : 0;
+    }
+    if(!ok){ po = start; no = start; continue; }
+    if(useNormal) hasNormal = true;
+  }
+  if(po === 0) return null;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(po === pos.length ? pos : pos.slice(0, po), 3));
+  if(hasNormal) geometry.setAttribute('normal', new THREE.BufferAttribute(no === normal.length ? normal : normal.slice(0, no), 3));
+  else geometry.computeVertexNormals();
+  geometry.computeBoundingBox();
+  return geometry;
+}
+function setThumbMessage(thumb: HTMLDivElement, message: string){
+  thumb.classList.remove('loading');
+  thumb.textContent = '';
+  const span = document.createElement('span');
+  span.className = 'dp-noimg';
+  span.textContent = message;
+  thumb.append(span);
+}
+function skipPreviewMessage(file: File, ext: string){
+  if(ext === 'step' || ext === 'stp') return `STEP\nプレビュー省略`;
+  if(ext === 'gcode' && file.size > PREVIEW_GCODE_MAX_BYTES) return `大きいG-code\nプレビュー省略\n${fmtBytes(file.size)}`;
+  if(ext !== 'stl' && file.size > PREVIEW_FULL_PARSE_MAX_BYTES) return `大きいファイル\nプレビュー省略\n${fmtBytes(file.size)}`;
+  return null;
+}
+function meshThumbFromGeometry(geometry: THREE.BufferGeometry): string | null {
+  const thumbGeometry = thumbnailGeometryFrom(geometry);
+  if(!thumbGeometry.attributes.normal) thumbGeometry.computeVertexNormals();
+  thumbGeometry.computeBoundingBox();
+  const hasVColor = !!geometry.attributes.color;
+  const mat = new THREE.MeshStandardMaterial({ color:hasVColor?0xffffff:0x9aa6b4, vertexColors:hasVColor, metalness:0.05, roughness:0.65, side:THREE.DoubleSide });
+  const mesh = new THREE.Mesh(thumbGeometry, mat);
+  const url = renderThumb(mesh, thumbGeometry.boundingBox!);
+  mat.dispose();
+  if(thumbGeometry !== geometry) thumbGeometry.dispose();
+  geometry.dispose();
+  return url;
+}
+function gcodeThumbFromParsed(parsed: ParsedGcode): string | null {
+  const { feats, bbox } = parsed;
+  const cx=(bbox.min[0]+bbox.max[0])/2, cy=(bbox.min[1]+bbox.max[1])/2, mz=bbox.min[2];
+  const grp = new THREE.Group();
+  const disposables: Array<THREE.BufferGeometry | THREE.Material> = [];
+  for(const [fname, f] of feats){
+    if(!f.segs.length) continue;
+    const pos = Float32Array.from(f.segs);
+    for(let i=0;i<pos.length;i+=3){ pos[i]-=cx; pos[i+1]-=cy; pos[i+2]-=mz; }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+    const mat = new THREE.LineBasicMaterial({ color:featureColor(fname) });
+    const obj = new THREE.LineSegments(g, mat); obj.frustumCulled = false;
+    grp.add(obj); disposables.push(g, mat);
+  }
+  if(!grp.children.length) return null;
+  const box = new THREE.Box3(
+    new THREE.Vector3(-(bbox.max[0]-bbox.min[0])/2, -(bbox.max[1]-bbox.min[1])/2, 0),
+    new THREE.Vector3((bbox.max[0]-bbox.min[0])/2, (bbox.max[1]-bbox.min[1])/2, bbox.max[2]-bbox.min[2]));
+  const url = renderThumb(grp, box);
+  disposables.forEach(d=> d.dispose());
+  return url;
+}
+// 1ファイルからプレビュー用サムネ(dataURL)を作る。gcode / スライス済み3mf / メッシュを判別。
+async function makeStlFileThumbnail(file: File, token: number): Promise<ThumbnailResult> {
+  if(file.size > PREVIEW_STL_SAMPLE_MAX_BYTES){
+    return { url:null, message:`大きいSTL\nプレビュー省略\n${fmtBytes(file.size)}` };
+  }
+  const buffer = await file.arrayBuffer();
+  if(token !== dirPickerToken) return { url:null };
+  const triCount = binaryStlTriangleCount(buffer);
+  if(triCount){
+    const geometry = sampledBinaryStlGeometry(buffer, triCount);
+    return geometry ? { url:meshThumbFromGeometry(geometry) } : { url:null, message:'プレビュー不可' };
+  }
+  if(file.size > PREVIEW_FULL_PARSE_MAX_BYTES){
+    return { url:null, message:`ASCII STL\nプレビュー省略\n${fmtBytes(file.size)}` };
+  }
+  const geometry = await parseBuffer(buffer, file.name);
+  if(token !== dirPickerToken){ geometry.dispose(); return { url:null }; }
+  return { url:meshThumbFromGeometry(geometry) };
+}
+async function makeFileThumbnail(file: File, name: string, token: number): Promise<ThumbnailResult> {
+  const ext = name.split('.').pop()!.toLowerCase();
+  const skip = skipPreviewMessage(file, ext);
+  if(skip) return { url:null, message:skip };
+  try {
+    if(ext === 'stl') return await makeStlFileThumbnail(file, token);
+    if(ext === 'gcode'){
+      const text = await file.text();
+      if(token !== dirPickerToken) return { url:null };
+      return { url:gcodeThumbFromParsed(parseGcode(text)) };
+    }
+    if(ext === '3mf'){
+      const buffer = await file.arrayBuffer();
+      if(token !== dirPickerToken) return { url:null };
+      const ex = extractGcodeFrom3mf(buffer);
+      if(ex) return { url:gcodeThumbFromParsed(parseGcode(ex.text)) };
+      const geometry = await parseBuffer(buffer, name);
+      if(token !== dirPickerToken){ geometry.dispose(); return { url:null }; }
+      return { url:meshThumbFromGeometry(geometry) };
+    }
+    const geometry = await parseFile(file);
+    if(token !== dirPickerToken){ geometry.dispose(); return { url:null }; }
+    return { url:meshThumbFromGeometry(geometry) };
+  } catch(err){ console.warn('プレビュー生成に失敗', name, err); return { url:null, message:'プレビュー不可' }; }
+}
+function fmtBytes(bytes: number){
+  if(bytes < 1024) return `${bytes} B`;
+  if(bytes < 1048576) return `${(bytes/1024).toFixed(0)} KB`;
+  return `${(bytes/1048576).toFixed(1)} MB`;
+}
+// プレビュー一覧を出し、表示モデルを選ばせる。解決値は選択パスの Set（表示）／null（キャンセル）。
+async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselected?: Set<string>): Promise<Set<string> | null>{
+  const token = ++dirPickerToken;
+  showBusy(`フォルダーを走査中… ${handle.name}`);
+  let files: DirFile[];
+  try { files = await collectBrowserDirectoryFiles(handle); }
+  catch(err){ showBusy(null); folderStatus.textContent = `フォルダーを開けませんでした: ${(err as Error).message}`; return null; }
+  showBusy(null);
+  if(token !== dirPickerToken) return null;   // 途中で別の選択が始まった
+  const modelFiles = files
+    .filter(item=> BROWSER_DIRECTORY_EXTENSIONS.has(item.file.name.split('.').pop()!.toLowerCase()))
+    .sort((a,b)=> a.path.localeCompare(b.path));
+  if(!modelFiles.length){
+    notify(`「${handle.name}」に対応モデルが見つかりませんでした。`, { level:'warning', duration:6000 });
+    return null;
+  }
+  const selected = new Set<string>(preselected ? [...preselected].filter(p=> modelFiles.some(m=>m.path===p)) : []);
+
+  return await new Promise<Set<string> | null>((resolve)=>{
+    let settled = false;
+    const finish = (value: Set<string> | null)=>{
+      if(settled) return; settled = true;
+      dirPickerToken++;                                   // 進行中のサムネ生成を打ち切る
+      window.removeEventListener('keydown', onKey);
+      dirPicker.classList.remove('show'); dirPicker.textContent = '';
+      resolve(value);
+    };
+    const onKey = (e: KeyboardEvent)=>{ if(e.key === 'Escape'){ e.preventDefault(); finish(null); } };
+    window.addEventListener('keydown', onKey);
+
+    const base = (p: string)=>{ const i=p.lastIndexOf('/'); return i<0 ? p : p.slice(i+1); };
+    const okBtn = document.createElement('button');
+    const countLabel = document.createElement('span');
+    const updateCount = ()=>{
+      countLabel.textContent = `${selected.size} 件を選択中`;
+      okBtn.textContent = `表示（${selected.size}）`;
+      okBtn.disabled = selected.size === 0;
+    };
+
+    // --- 一覧グリッド ---
+    const grid = document.createElement('div'); grid.className = 'dp-grid';
+    const cardByPath = new Map<string, { thumb: HTMLDivElement; cb: HTMLInputElement }>();
+    for(const item of modelFiles){
+      const ext = item.file.name.split('.').pop()!.toLowerCase();
+      const card = document.createElement('label'); card.className = 'dp-card'; card.title = item.path;
+      const thumb = document.createElement('div'); thumb.className = 'dp-thumb loading';
+      thumb.innerHTML = '<span class="dp-spin"></span>';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'dp-check';
+      cb.checked = selected.has(item.path);
+      if(cb.checked) card.classList.add('sel');
+      cb.onchange = ()=>{
+        if(cb.checked) selected.add(item.path); else selected.delete(item.path);
+        card.classList.toggle('sel', cb.checked);
+        updateCount();
+      };
+      const nm = document.createElement('div'); nm.className = 'dp-name'; nm.textContent = base(item.path);
+      const sub = document.createElement('div'); sub.className = 'dp-sub';
+      sub.textContent = `${ext.toUpperCase()} · ${fmtBytes(item.file.size)}`;
+      card.append(cb, thumb, nm, sub);
+      grid.append(card);
+      cardByPath.set(item.path, { thumb, cb });
+    }
+
+    // --- ヘッダ・ツール・フッタ ---
+    const panel = document.createElement('div'); panel.className = 'dp-panel';
+    const head = document.createElement('div'); head.className = 'dp-head';
+    const title = document.createElement('div'); title.className = 'dp-title'; title.textContent = '表示するモデルを選択';
+    const hsub = document.createElement('div'); hsub.className = 'dp-hsub';
+    hsub.textContent = `${handle.name} · ${modelFiles.length} 件`; hsub.title = handle.name;
+    const closeBtn = document.createElement('button'); closeBtn.className = 'dp-close'; closeBtn.textContent = '×'; closeBtn.title = 'キャンセル';
+    closeBtn.onclick = ()=> finish(null);
+    head.append(title, hsub, closeBtn);
+
+    const tools = document.createElement('div'); tools.className = 'dp-tools';
+    const allBtn = document.createElement('button'); allBtn.className = 'dp-tool'; allBtn.textContent = '全選択';
+    const noneBtn = document.createElement('button'); noneBtn.className = 'dp-tool'; noneBtn.textContent = '全解除';
+    const stopPreviewBtn = document.createElement('button'); stopPreviewBtn.className = 'dp-tool'; stopPreviewBtn.textContent = 'プレビュー停止';
+    const setAll = (on: boolean)=>{
+      selected.clear();
+      for(const item of modelFiles){
+        const ref = cardByPath.get(item.path)!;
+        ref.cb.checked = on; ref.cb.closest('.dp-card')!.classList.toggle('sel', on);
+        if(on) selected.add(item.path);
+      }
+      updateCount();
+    };
+    allBtn.onclick = ()=> setAll(true);
+    noneBtn.onclick = ()=> setAll(false);
+    stopPreviewBtn.onclick = ()=>{
+      if(token !== dirPickerToken) return;
+      dirPickerToken++;
+      stopPreviewBtn.disabled = true;
+      for(const ref of cardByPath.values()){
+        if(ref.thumb.classList.contains('loading')) setThumbMessage(ref.thumb, 'プレビュー停止');
+      }
+    };
+    const toolHint = document.createElement('span'); toolHint.className = 'dp-toolhint';
+    toolHint.textContent = '大きいSTLは軽量サンプル、重い形式はプレビュー省略。';
+    tools.append(allBtn, noneBtn, stopPreviewBtn, toolHint);
+
+    const foot = document.createElement('div'); foot.className = 'dp-foot';
+    countLabel.className = 'dp-count';
+    const cancelBtn = document.createElement('button'); cancelBtn.className = 'dp-cancel'; cancelBtn.textContent = 'キャンセル';
+    cancelBtn.onclick = ()=> finish(null);
+    okBtn.className = 'dp-ok';
+    okBtn.onclick = ()=> finish(new Set(selected));
+    foot.append(countLabel, cancelBtn, okBtn);
+    updateCount();
+
+    panel.append(head, tools, grid, foot);
+    // 背景クリック（パネル外）でキャンセル
+    dirPicker.onclick = (e)=>{ if(e.target === dirPicker) finish(null); };
+    dirPicker.textContent = ''; dirPicker.append(panel); dirPicker.classList.add('show');
+
+    // サムネイルを1枚ずつ生成（順次・UIを止めない）。token が変われば打ち切る。
+    // 大容量ファイルは解析コストが高いので、プレビュー生成をスキップして選択だけ可能にする。
+    (async ()=>{
+      for(const item of modelFiles){
+        if(token !== dirPickerToken) return;
+        const result = await makeFileThumbnail(item.file, item.path, token);
+        if(token !== dirPickerToken) return;
+        const ref = cardByPath.get(item.path);
+        if(!ref) continue;
+        ref.thumb.classList.remove('loading');
+        if(result.url){
+          const img = document.createElement('img'); img.src = result.url; img.alt = base(item.path);
+          ref.thumb.textContent = ''; ref.thumb.append(img);
+        } else {
+          ref.thumb.textContent = ''; ref.thumb.classList.add('noimg');
+          setThumbMessage(ref.thumb, result.message || 'プレビュー不可');
+        }
+        await nextFrame();
+      }
+      stopPreviewBtn.disabled = true;
+    })();
+  });
 }
 
 function mergeObject(root: THREE.Object3D): THREE.BufferGeometry | null {
@@ -904,10 +1424,22 @@ function mergeObject(root: THREE.Object3D): THREE.BufferGeometry | null {
 // STEP/glTF の色を焼き込む際の彩度倍率（1=無加工）。PBR＋環境光で寝るのを補正。
 const COLOR_SATURATION: number = 1.4;
 
+function objectPathName(root: THREE.Object3D, obj: THREE.Object3D, fallback: string){
+  const names: string[] = [];
+  for(let cur: THREE.Object3D | null = obj; cur && cur !== root; cur = cur.parent){
+    const name = cur.name?.trim();
+    if(name) names.unshift(name);
+  }
+  const path = names.join(' / ');
+  return path || fallback;
+}
+
 // glTF/GLB を単一ジオメトリへ統合しつつ、各メッシュのマテリアル色（または頂点色）を
 // 頂点カラー属性に焼き込む。glTFのbaseColorはリニア空間なのでそのまま使える。
-function mergeColored(root: THREE.Object3D): THREE.BufferGeometry | null {
-  const geoms: THREE.BufferGeometry[] = []; let hasColor = false;
+// 同時に、後から部品単位で表示/非表示できるよう geometry group の範囲も保持する。
+function mergeColored(root: THREE.Object3D): ParsedMesh | null {
+  const geoms: { geometry: THREE.BufferGeometry; name: string; color: number }[] = [];
+  let hasColor = false;
   root.updateMatrixWorld(true);
   root.traverse(o=>{
     const om = o as THREE.Mesh;
@@ -918,29 +1450,30 @@ function mergeColored(root: THREE.Object3D): THREE.BufferGeometry | null {
     const n = src.attributes.position.count;
     const col = new Float32Array(n*3);
     const mat = (Array.isArray(om.material) ? om.material[0] : om.material) as THREE.MeshStandardMaterial;
+    const baseColor = (mat && mat.color) ? mat.color.clone() : new THREE.Color(0.8,0.8,0.8);
     const existing = src.attributes.color;
     if(existing){
       hasColor = true;
       for(let i=0;i<n;i++){ col[i*3]=existing.getX(i); col[i*3+1]=existing.getY(i); col[i*3+2]=existing.getZ(i); }
     } else {
-      const c = (mat && mat.color) ? mat.color : new THREE.Color(0.8,0.8,0.8);
       if(mat && mat.color) hasColor = true;
-      for(let i=0;i<n;i++){ col[i*3]=c.r; col[i*3+1]=c.g; col[i*3+2]=c.b; }
+      for(let i=0;i<n;i++){ col[i*3]=baseColor.r; col[i*3+1]=baseColor.g; col[i*3+2]=baseColor.b; }
     }
     src.setAttribute('color', new THREE.BufferAttribute(col,3));
     const keep = new THREE.BufferGeometry();
     keep.setAttribute('position', src.attributes.position.clone());
     keep.setAttribute('color', src.attributes.color);
     if(src.attributes.normal) keep.setAttribute('normal', src.attributes.normal.clone());
-    geoms.push(keep);
+    geoms.push({ geometry:keep, name:objectPathName(root, om, `部品 ${geoms.length + 1}`), color:baseColor.getHex() });
+    src.dispose();
   });
   if(geoms.length === 0) return null;
-  let total = 0; geoms.forEach(g=> total += g.attributes.position.count);
+  let total = 0; geoms.forEach(item=> total += item.geometry.attributes.position.count);
   const pos = new Float32Array(total*3), col = new Float32Array(total*3);
-  let hasN = geoms.every(g=>g.attributes.normal);
+  let hasN = geoms.every(item=>item.geometry.attributes.normal);
   const nor = hasN ? new Float32Array(total*3) : null;
   let off = 0;
-  geoms.forEach(g=>{
+  geoms.forEach(({ geometry:g })=>{
     pos.set(g.attributes.position.array, off);
     col.set(g.attributes.color.array, off);
     if(hasN) nor!.set(g.attributes.normal.array, off);
@@ -961,7 +1494,22 @@ function mergeColored(root: THREE.Object3D): THREE.BufferGeometry | null {
   merged.setAttribute('position', new THREE.BufferAttribute(pos,3));
   if(hasColor) merged.setAttribute('color', new THREE.BufferAttribute(col,3));
   if(hasN) merged.setAttribute('normal', new THREE.BufferAttribute(nor!,3)); else merged.computeVertexNormals();
-  return merged;
+  const partByName = new Map<string, MeshPartSpec>();
+  let vertexStart = 0;
+  geoms.forEach(({ geometry:g, name, color })=>{
+    const count = g.attributes.position.count;
+    let part = partByName.get(name);
+    if(!part){
+      part = { name, ranges:[], tri:0, color };
+      partByName.set(name, part);
+    }
+    part.ranges.push({ start:vertexStart, count });
+    part.tri += Math.floor(count / 3);
+    vertexStart += count;
+    g.dispose();
+  });
+  const parts = [...partByName.values()].filter(part=>part.tri > 0);
+  return { geometry:merged, parts:parts.length > 1 ? parts : undefined };
 }
 
 // glTF/GLB: three.js GLTFLoader（色・マテリアルをネイティブ対応）。
@@ -970,9 +1518,9 @@ async function loadGltf(buf: ArrayBuffer | { buffer: ArrayBuffer }){
   showBusy('glTF読み込み中…');
   const loader = new GLTFLoader();
   const gltf = await loader.parseAsync(buf instanceof ArrayBuffer ? buf : buf.buffer, '');
-  const g = mergeColored(gltf.scene);
-  if(!g) throw new Error('glTFにメッシュがありません');
-  return g;
+  const parsed = mergeColored(gltf.scene);
+  if(!parsed) throw new Error('glTFにメッシュがありません');
+  return parsed;
 }
 
 // STEP: フル版OCCT (opencascade.js) をブラウザ内で動かし、面ごと色まで解決して
@@ -1031,9 +1579,9 @@ async function loadStep(buf: ArrayBuffer){
   reader.delete(); writer.delete(); conv.delete(); labels.delete();
   oc.FS.unlink('/in.step'); oc.FS.unlink('/out.glb');
   const gltf = await new GLTFLoader().parseAsync(ab, '');
-  const g = mergeColored(gltf.scene);
-  if(!g) throw new Error('STEPからメッシュを取得できませんでした');
-  return g;
+  const parsed = mergeColored(gltf.scene);
+  if(!parsed) throw new Error('STEPからメッシュを取得できませんでした');
+  return parsed;
 }
 
 // ---------- サムネイル生成（モデル一覧の小プレビュー） ----------
@@ -1078,12 +1626,105 @@ function makeThumbnail(m: Model){
       return url;
     }
     const hasVColor = !!m.geometry.attributes.color;
-    const mat = new THREE.MeshStandardMaterial({ color:hasVColor?0xffffff:m.color, vertexColors:hasVColor, metalness:0.05, roughness:0.65, side:THREE.DoubleSide });
-    const mesh = new THREE.Mesh(m.geometry, mat);
-    const url = renderThumb(mesh, m.geometry.boundingBox!);
+    const thumbGeometry = thumbnailGeometryFrom(m.geometry);
+    // 法線が無いのはマージ済みジオメトリ。computeVertexNormals すると thumbnailGeometryFrom が
+    // 原本をそのまま返した場合に本体を滑らか法線で汚すので、フラットシェーディングで描く。
+    const flat = !thumbGeometry.attributes.normal;
+    thumbGeometry.computeBoundingBox();
+    const mat = new THREE.MeshStandardMaterial({ color:hasVColor?0xffffff:m.color, vertexColors:hasVColor, metalness:0.05, roughness:0.65, side:THREE.DoubleSide, flatShading:flat });
+    const mesh = new THREE.Mesh(thumbGeometry, mat);
+    const url = renderThumb(mesh, thumbGeometry.boundingBox!);
+    if(thumbGeometry !== m.geometry) thumbGeometry.dispose();
     mat.dispose();
     return url;
   } catch(e){ console.warn('サムネイル生成に失敗', e); return null; }
+}
+
+function createNormalMaterial(){
+  return new THREE.MeshNormalMaterial({ side:THREE.DoubleSide });
+}
+function createBackfaceMaterial(){
+  return new THREE.MeshBasicMaterial({ color:0xff3b30, side:THREE.BackSide });
+}
+
+// ---------- 無劣化の軽量化（頂点マージ） ----------
+// 三角形は1枚も減らさない。STL等は三角形ごとに頂点を重複して持つため、共有頂点を統合すると
+// 頂点バッファとGPUメモリが数分の一になる。見た目・寸法・体積・レイキャスト結果は不変。
+const LITE_MIN_TRI = 20000;   // これ未満は最適化しても体感差が無く、走査コストだけ増える
+
+// 三角形の3頂点が同一法線を持つ（＝フラットシェーディング相当）か。
+// 滑らかな法線を持つモデル（STEP/glTF）は統合すると陰影が変わるため触らない。
+function hasFlatNormals(g: THREE.BufferGeometry){
+  const n = g.attributes.normal;
+  if(!n) return true;   // 法線が無ければ後段の computeVertexNormals が面法線を作るので同じこと
+  for(let i=0;i<n.count;i+=3){
+    const x=n.getX(i), y=n.getY(i), z=n.getZ(i);
+    for(let k=1;k<3;k++){
+      if(n.getX(i+k)!==x || n.getY(i+k)!==y || n.getZ(i+k)!==z) return false;
+    }
+  }
+  return true;
+}
+// 座標が float32 のビット列として完全一致する頂点だけを統合する。
+// three の mergeVertices は tolerance で座標を丸めるため頂点がわずかに動く（既定 1e-4）。
+// 検証用途では1ビットも動かしたくないので、ここは自前で厳密一致のみを扱う。
+// 統合できなければ null。
+function mergeVerticesExact(g: THREE.BufferGeometry): THREE.BufferGeometry | null {
+  const pos = g.attributes.position as THREE.BufferAttribute;
+  const src = pos.array;
+  const n = pos.count;
+  if(!(src instanceof Float32Array) || pos.itemSize !== 3 || src.length !== n*3) return null;
+
+  const bits = new Uint32Array(src.buffer, src.byteOffset, n*3);
+  const outBits = new Uint32Array(n*3);
+  const index = new Uint32Array(n);
+  // ビット列の32bitハッシュでバケットに分け、候補だけを厳密比較する（文字列キーだと巨大メッシュで破綻する）
+  const buckets = new Map<number, number[]>();
+  let unique = 0;
+  for(let i=0;i<n;i++){
+    const b0 = bits[i*3], b1 = bits[i*3+1], b2 = bits[i*3+2];
+    const h = (b0 ^ Math.imul(b1, 0x9e3779b1) ^ Math.imul(b2, 0x85ebca6b)) | 0;
+    let bucket = buckets.get(h);
+    let id = -1;
+    if(bucket){
+      for(const cand of bucket){
+        if(outBits[cand*3]===b0 && outBits[cand*3+1]===b1 && outBits[cand*3+2]===b2){ id = cand; break; }
+      }
+    } else {
+      bucket = []; buckets.set(h, bucket);
+    }
+    if(id < 0){
+      id = unique++;
+      outBits[id*3]=b0; outBits[id*3+1]=b1; outBits[id*3+2]=b2;
+      bucket.push(id);
+    }
+    index[i] = id;
+  }
+  if(unique >= n) return null;   // 共有頂点が無い（統合しても無意味）
+
+  const merged = new THREE.BufferGeometry();
+  const outPos = new Float32Array(outBits.buffer, 0, unique*3);
+  merged.setAttribute('position', new THREE.BufferAttribute(outPos.slice(), 3));
+  merged.setIndex(new THREE.BufferAttribute(unique > 65535 ? index : new Uint16Array(index), 1));
+  return merged;
+}
+
+interface OptimizeResult { geometry: THREE.BufferGeometry; flat: boolean; before: number; after: number; }
+function optimizeGeometry(g: THREE.BufferGeometry, hasParts: boolean): OptimizeResult {
+  const before = g.attributes.position.count;
+  const skip: OptimizeResult = { geometry:g, flat:false, before, after:before };
+  if(!lite) return skip;
+  if(before < LITE_MIN_TRI*3) return skip;
+  if(g.index) return skip;                 // 既にインデックス化済み
+  if(hasParts) return skip;                // 部品ごとの描画レンジが頂点番号に依存するため崩せない
+  if(g.attributes.color) return skip;      // 頂点カラーは統合キーに含める必要があり、利得も小さい
+  if(!hasFlatNormals(g)) return skip;
+
+  // 法線は捨てる。面法線はシェーダの微分から求める（flatShading）ので陰影は元のまま。
+  const merged = mergeVerticesExact(g);
+  if(!merged) return skip;
+  g.dispose();
+  return { geometry:merged, flat:true, before, after:merged.attributes.position.count };
 }
 
 // ---------- モデル追加 ----------
@@ -1092,7 +1733,9 @@ function insertModel(m: Model, previous?: PreviousState | null){
   else models.push(m);
 }
 function addModel(name: string, geometry: THREE.BufferGeometry, options: LoadOptions = {}){
-  if(!geometry.attributes.normal) geometry.computeVertexNormals();
+  const opt = optimizeGeometry(geometry, !!options.parts?.length);
+  geometry = opt.geometry;
+  if(!opt.flat && !geometry.attributes.normal) geometry.computeVertexNormals();
   geometry.computeBoundingBox();
 
   // 原点中心(XY)・底面z=0へ正規化（整列は relayout で行う）
@@ -1108,12 +1751,33 @@ function addModel(name: string, geometry: THREE.BufferGeometry, options: LoadOpt
   const hasVColor = !!geometry.attributes.color;
   const mat = new THREE.MeshStandardMaterial({
     color: hasVColor ? 0xffffff : color, vertexColors: hasVColor,
-    metalness:0.05, roughness:0.65, side:THREE.DoubleSide, clippingPlanes:[]
+    metalness:0.05, roughness:0.65, side:THREE.DoubleSide, clippingPlanes:[],
+    flatShading: opt.flat,
   });
+  const partSpecs = (options.parts || []).filter(part=>part.ranges.length && part.tri > 0);
+  const parts: ModelPart[] | undefined = partSpecs.length > 1 ? partSpecs.map((part)=>{
+    const partMat = new THREE.MeshStandardMaterial({
+      color:hasVColor ? 0xffffff : (part.color ?? color), vertexColors:hasVColor,
+      metalness:0.05, roughness:0.65, side:THREE.DoubleSide, clippingPlanes:[],
+    });
+    return {
+      ...part,
+      visible: options.previous?.partVisible?.get(part.name) ?? true,
+      mat:partMat,
+      normalMat:createNormalMaterial(),
+      backfaceMat:createBackfaceMaterial(),
+    };
+  }) : undefined;
+  if(parts){
+    geometry.clearGroups();
+    for(let i=0;i<parts.length;i++){
+      for(const range of parts[i].ranges) geometry.addGroup(range.start, range.count, i);
+    }
+  }
 
-  const mesh = new THREE.Mesh(geometry, mat);
+  const mesh = new THREE.Mesh(geometry, parts ? parts.map(part=>part.mat) : mat);
   const box = new THREE.Box3Helper(geometry.boundingBox!.clone(), 0xffb347);
-  const backface = new THREE.Mesh(geometry, backfaceRed);
+  const backface = new THREE.Mesh(geometry, parts ? parts.map(part=>part.backfaceMat) : backfaceRed);
   const selectionBox = new THREE.Box3Helper(geometry.boundingBox!.clone(), 0x4f9cff); selectionBox.visible=false;
   const label = createModelLabel(name, size, color);
 
@@ -1126,19 +1790,34 @@ function addModel(name: string, geometry: THREE.BufferGeometry, options: LoadOpt
     id:options.previous?.id ?? ++modelIdCursor,
     name, group, mesh, wire:null, edges:null, box, backface, selectionBox, label, geometry, mat, color, visible:true,
     size, tri:Math.round(tri), vert:geometry.attributes.position.count, vol:signedVolume(geometry),
+    flat:opt.flat,
     sourceKey:options.sourceKey, sourceUrl:options.sourceUrl,
     mtime:options.mtime ?? options.previous?.mtime ?? null,
+    parts,
   };
   if(options.previous) m.visible = options.previous.visible;
   m.thumb = makeThumbnail(m);
   insertModel(m, options.previous);
   if(options.previous?.selected) setSelectedModel(m.id); else updateModelDecorations();
 
-  document.getElementById('hint')!.style.display = 'none';
   renderList();
   relayout();
   applyDisplay();
   if(models.length === 1) fitView();
+  reportLoadStats(m, opt);
+}
+
+// 重いモデルを読み込んだときだけ、規模と軽量化の効きを通知する（軽いモデルでは邪魔なので出さない）。
+function reportLoadStats(m: Model, opt: OptimizeResult){
+  if(m.tri < LITE_MIN_TRI) return;
+  const lines = [m.name, `三角形 ${m.tri.toLocaleString()} / 頂点 ${m.vert.toLocaleString()}`];
+  if(opt.flat){
+    const cut = Math.round((1 - opt.after/opt.before) * 100);
+    lines.push(`重複頂点を統合して頂点数 -${cut}%（三角形は減らしていません）`);
+  }
+  const sec = loadElapsedSec();
+  if(sec !== null) lines.push(`読み込み ${sec.toFixed(1)} 秒`);
+  notify(lines.join('\n'), { level:'info', duration:7000 });
 }
 
 // ワイヤー/エッジは重いので必要時のみ生成。巨大メッシュは安全のためスキップ。
@@ -1175,13 +1854,19 @@ function removeModel(m: Model){
     gcSyncRowUpdate();
   } else {
     m.mat!.dispose();
+    if(m.parts){
+      for(const part of m.parts){
+        part.mat.dispose();
+        part.normalMat.dispose();
+        part.backfaceMat.dispose();
+      }
+    }
     if(m.wire){ m.wire.geometry.dispose(); (m.wire.material as THREE.Material).dispose(); }
     if(m.edges){ m.edges.geometry.dispose(); (m.edges.material as THREE.Material).dispose(); }
   }
   models.splice(i,1);
   if(m.id===selectedModelId) setSelectedModel(null);
   renderList(); relayout(); applyDisplay();
-  if(models.length === 0){ document.getElementById('hint')!.style.display = ''; }
 }
 
 function signedVolume(geometry: THREE.BufferGeometry){
@@ -1202,6 +1887,9 @@ function signedVolume(geometry: THREE.BufferGeometry){
 // その場合は内蔵 gcode を取り出してツールパス表示する。メッシュ入りなら null を返して
 // 従来のメッシュ表示へフォールバックさせる。
 function extractGcodeFrom3mf(buf: ArrayBuffer){
+  // スライス済み(gcode入り)3mfは小さい。大容量メッシュ3mfをここで一括展開すると
+  // 展開後が巨大でタブがOOMするため、閾値超は gcode 抽出を行わずメッシュ解析へ委ねる。
+  if(buf.byteLength > LARGE_3MF_COMPRESSED) return null;
   let files: Record<string, Uint8Array>;
   try { files = (fflate as any).unzipSync(new Uint8Array(buf)); } catch(e){ return null; }
   // Metadata/plate_*.gcode（.md5 は除外）を探す
@@ -1374,7 +2062,6 @@ function addGcode(name: string, parsed: ParsedGcode, resultJson: ResultJson | nu
   insertModel(m, options.previous);
   if(options.previous?.selected) setSelectedModel(m.id); else updateModelDecorations();
   activeGcode = m;
-  document.getElementById('hint')!.style.display = 'none';
   renderList(); relayout(); applyDisplay();
   buildGcodePanel(m);
   applyGcMode(); gcSyncRowUpdate();
@@ -1685,6 +2372,7 @@ function fmtMtime(ms: number | null | undefined){
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 function renderList(){
+  syncEmptyState();
   document.getElementById('mcount')!.textContent = models.length ? `(${models.length})` : '';
   // 名前ラベルは2個以上のときだけ意味を持つので、トグル行も1個以下では隠す。
   document.getElementById('rowLabels')!.style.display = models.length >= 2 ? '' : 'none';
@@ -1704,12 +2392,18 @@ function renderList(){
         ],
       };
     }
+    const parts = m.parts?.map((part, index)=>({
+      index, name:part.name, visible:part.visible, tri:part.tri,
+    }));
+    const partDetail = parts?.length ? [{ label:'部品', value:`${parts.filter(part=>part.visible).length}/${parts.length}` }] : [];
     return {
       id:m.id, name:m.name, isGcode:false, color:hex, visible:m.visible, thumb:m.thumb||null, opacity:m.opacity ?? 1,
+      parts,
       details:[
         { label:'三角形', value:f(m.tri) }, { label:'頂点', value:f(m.vert) },
         { label:'X', value:m.size.x.toFixed(1) }, { label:'Y', value:m.size.y.toFixed(1) },
         { label:'Z', value:m.size.z.toFixed(1) }, { label:'体積', value:(m.vol/1000).toFixed(1)+'cm³' },
+        ...partDetail,
         ...mtimeDetail,
       ],
     };
@@ -1725,6 +2419,12 @@ window.addEventListener('viewer:model-action', (event)=>{
   if(action==='cycle-color' && !m.isGcode){
     m.color = PALETTE[(PALETTE.indexOf(m.color)+1) % PALETTE.length];
     // インポート色（頂点カラー）を持つモデルは、ユーザーが明示的に色を選んだら単色に切替える。
+    if(m.parts){
+      for(const part of m.parts){
+        if(part.mat.vertexColors){ part.mat.vertexColors=false; part.mat.needsUpdate=true; }
+        part.mat.color.set(m.color);
+      }
+    }
     if(m.mat!.vertexColors){ m.mat!.vertexColors=false; m.mat!.needsUpdate=true; }
     m.mat!.color.set(m.color); refreshModelLabel(m); setSelectedModel(m.id); renderList(); return;
   }
@@ -1736,13 +2436,44 @@ window.addEventListener('viewer:model-action', (event)=>{
     // ストアの値はユーザーがドラッグ中の値と一致するので、再描画してもスライダーは飛ばない（％表示だけ追従）
     applyDisplay(); renderList(); return;
   }
+  if(action==='set-part-visible' && !m.isGcode && m.parts && typeof value === 'object' && value){
+    const { partIndex, visible } = value as { partIndex: number; visible: boolean };
+    const part = m.parts[partIndex];
+    if(part){ part.visible = !!visible; setSelectedModel(m.id); applyDisplay(); renderList(); }
+    return;
+  }
+  if(action==='set-all-parts-visible' && !m.isGcode && m.parts){
+    for(const part of m.parts) part.visible = !!value;
+    setSelectedModel(m.id); applyDisplay(); renderList(); return;
+  }
   if(action==='remove') removeModel(m);
 });
 
 // ---------- 表示切替 ----------
+function setMaterialCommon(mat: THREE.Material, planes: THREE.Plane[], side?: THREE.Side){
+  mat.clippingPlanes = planes;
+  if(side !== undefined) mat.side = side;
+}
+function syncPartMaterialState(m: Model, planes: THREE.Plane[], side: THREE.Side, opacity: number){
+  if(!m.parts) return;
+  const transp = opacity < 1;
+  for(const part of m.parts){
+    part.mat.visible = part.visible;
+    part.normalMat.visible = part.visible;
+    part.backfaceMat.visible = part.visible;
+    part.mat.clippingPlanes = planes;
+    part.normalMat.clippingPlanes = planes;
+    part.backfaceMat.clippingPlanes = planes;
+    part.mat.side = side;
+    part.normalMat.side = side;
+    part.mat.transparent = transp;
+    part.mat.opacity = opacity;
+    part.mat.depthWrite = !transp;
+  }
+}
 function applyDisplay(){
   const planes = state.clip ? [clipPlane] : [];
-  normalMat.clippingPlanes = planes; backfaceRed.clippingPlanes = planes;
+  normalMat.clippingPlanes = planes; flatNormalMat.clippingPlanes = planes; backfaceRed.clippingPlanes = planes;
   const hasGcode = models.some(m=> m.isGcode);
   for(const m of models){
     m.group.visible = m.visible;
@@ -1755,30 +2486,53 @@ function applyDisplay(){
     // gcodeがある時にゴースト指定なら、メッシュを薄く重ねてオーバーレイ比較
     const ghost = gcGhost && hasGcode;
     m.mesh!.visible = state.solid || state.normal;
-    m.mesh!.material = state.normal ? normalMat : m.mat!;
+    m.mesh!.material = m.parts ? m.parts.map(part=> state.normal ? part.normalMat : part.mat) : (state.normal ? (m.flat ? flatNormalMat : normalMat) : m.mat!);
     m.mat!.clippingPlanes = planes;
     // 裏面警告ON時は本体を表面のみ描画(FrontSide)にして、重ねた赤BackSideメッシュが
     // 穴や法線反転で裏面が見える箇所だけを赤く覗かせる。DoubleSideのままだと本体が
     // 裏面も通常色で描いてしまい赤と深度衝突して出ない。
-    (m.mesh!.material as THREE.Material).side = state.backface ? THREE.FrontSide : THREE.DoubleSide;
-    // 全体設定（ゴースト/半透明）と部品ごとの不透明度の、より透明な方を採用
+    const solidSide = state.backface ? THREE.FrontSide : THREE.DoubleSide;
+    if(Array.isArray(m.mesh!.material)){
+      for(const mat of m.mesh!.material) setMaterialCommon(mat, planes, solidSide);
+    } else {
+      setMaterialCommon(m.mesh!.material as THREE.Material, planes, solidSide);
+    }
+    // 全体設定（ゴースト/半透明）とモデルごとの不透明度の、より透明な方を採用
     const ghostOp = ghost ? 0.18 : (state.opacity ? 0.45 : 1.0);
     const op = Math.min(ghostOp, m.opacity ?? 1);
     const transp = op < 1;
     m.mat!.transparent = transp; m.mat!.opacity = op; m.mat!.depthWrite = !transp;
+    syncPartMaterialState(m, planes, solidSide, op);
     if(state.wire) ensureWire(m);
     if(state.edges) ensureEdges(m);
-    if(m.wire)  m.wire.visible  = state.wire;
-    if(m.edges) m.edges.visible = state.edges;
+    const hasHiddenParts = !!m.parts?.some(part=>!part.visible);
+    if(m.wire)  m.wire.visible  = state.wire && !hasHiddenParts;
+    if(m.edges) m.edges.visible = state.edges && !hasHiddenParts;
+    m.backface!.material = m.parts ? m.parts.map(part=>part.backfaceMat) : backfaceRed;
     m.backface!.visible = state.backface;
     m.box!.visible = state.box;
   }
   updateModelDecorations();
+  // フォルダー監視の自動更新などDOMイベントを伴わない変更でも描き直させる。
+  invalidate();
 }
 
 const bind = (id: string, key2: StateBoolKey, after?: ()=>void)=> document.getElementById(id)!.addEventListener('change', e=>{
   state[key2] = (e.target as HTMLInputElement).checked; applyDisplay(); if(after) after();
 });
+// 軽量表示：頂点マージは読み込み時に効くため、OFF→ON の切替は次に読み込むモデルから反映される。
+// 解像度の追従はその場で切り替わる。
+const cLite = document.getElementById('cLite') as HTMLInputElement;
+cLite.addEventListener('change', ()=>{ lite = cLite.checked; appliedDpr = 0; applyPixelRatio(); invalidate(); });
+
+const cStats = document.getElementById('cStats') as HTMLInputElement;
+cStats.addEventListener('change', ()=>{
+  showPerf = cStats.checked;
+  perfEl.classList.toggle('show', showPerf);
+  renderedFrames = 0; perfLastT = performance.now();
+  invalidate();
+});
+
 bind('cSolid','solid');
 bind('cWire','wire', ()=> notifySkipped('wire', 'ワイヤーフレーム'));
 bind('cEdges','edges', ()=> notifySkipped('edges', 'エッジ'));
@@ -2044,22 +2798,83 @@ renderer.domElement.addEventListener('dblclick', (e)=>{
 });
 
 // ---------- ループ ----------
+// ---------- 描画スケジューリング ----------
+// オンデマンド描画：変化があったフレームだけ描く。静止中はGPUを止められるので、重いモデルでも
+// 発熱・電力を抑えられる。見た目は一切変わらないため軽量表示のON/OFFに関係なく常時有効。
+function invalidate(frames = 2){ renderRequests = Math.max(renderRequests, frames); }
+
+// 視点操作中だけ描画解像度を落とす。手を離した瞬間にフル解像度で描き直すので、
+// 静止して検証している間は常に最高品質。
+const MAX_DPR = 2;
+let interacting = false;
+let appliedDpr = 0;
+function targetDpr(){
+  const full = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+  return (lite && interacting) ? Math.max(1, full * 0.6) : full;
+}
+function applyPixelRatio(){
+  const dpr = targetDpr();
+  if(Math.abs(dpr - appliedDpr) < 0.01) return;
+  appliedDpr = dpr;
+  renderer.setPixelRatio(dpr);
+  renderer.setSize(viewEl.clientWidth, viewEl.clientHeight);
+}
 function resize(){
   const w = viewEl.clientWidth, h = viewEl.clientHeight;
   renderer.setSize(w,h);
   perspCamera.aspect = w/h; perspCamera.updateProjectionMatrix();
   applyOrthoFrustum();   // 平行投影の左右枠もアスペクト比に追従
+  invalidate();
 }
-window.addEventListener('resize', resize); resize();
+window.addEventListener('resize', resize); applyPixelRatio(); resize();
+// パネルの表示/非表示（空状態の切替）でも #view の実寸が変わるため、要素サイズを直接監視する。
+new ResizeObserver(resize).observe(viewEl);
+
+controls.addEventListener('change', ()=> invalidate());
+controls.addEventListener('start', ()=>{ interacting = true; invalidate(); });
+controls.addEventListener('end',   ()=>{ interacting = false; invalidate(); });
+tcontrols.addEventListener('change', ()=> invalidate());
+// パネル操作・クリック選択・キー操作など、個別の invalidate 漏れを拾う保険。
+// pointermove は含めない（マウスを動かすだけで描画が走り、静止時の省電力が消えるため）。
+for(const ev of ['pointerdown','pointerup','wheel','keydown','input','change','click']){
+  document.addEventListener(ev, ()=> invalidate(2), { capture:true, passive:true });
+}
+
+// ---------- パフォーマンス表示 ----------
+const perfEl = document.getElementById('perf')!;
+let showPerf = false;
+let renderedFrames = 0, perfLastT = performance.now();
+function perfTick(now: number){
+  if(!showPerf || now - perfLastT < 500) return;
+  const fps = renderedFrames * 1000 / (now - perfLastT);
+  const idle = renderedFrames === 0;
+  renderedFrames = 0; perfLastT = now;
+  const info = renderer.info;
+  let tri = 0, vert = 0;
+  for(const m of models){ if(!m.isGcode){ tri += m.tri; vert += m.vert; } }
+  perfEl.textContent = [
+    idle ? '静止中（描画停止）' : `${fps.toFixed(0)} fps`,
+    `描画三角形   ${info.render.triangles.toLocaleString()}`,
+    `ドローコール ${info.render.calls}`,
+    `メッシュ     ${tri.toLocaleString()} 三角形 / ${vert.toLocaleString()} 頂点`,
+    `ピクセル比   ${appliedDpr.toFixed(2)}x`,
+  ].join('\n');
+}
 
 let _lastT = performance.now();
 function animate(){
   requestAnimationFrame(animate);
   const now = performance.now(), dt = Math.min((now-_lastT)/1000, 0.1); _lastT = now;
   tickPlayback(dt);
-  if(spin){ for(const m of models) m.group.rotation.z += 0.005; }
-  controls.update();
+  if(gcPlaying) invalidate(1);
+  if(spin){ for(const m of models) m.group.rotation.z += 0.005; invalidate(1); }
+  if(controls.update()) invalidate(1);
+  perfTick(now);
+  if(renderRequests <= 0) return;
+  renderRequests--;
+  applyPixelRatio();
   renderer.render(scene, camera);
+  renderedFrames++;
 }
 // 同一オリジンで公開済みのファイルは ?model=foo.stl / ?gcode=plate.gcode（各複数可）で自動ロードできる。
 {
