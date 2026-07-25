@@ -174,6 +174,29 @@ let camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = perspCamera;
 let orthoView = false;
 let orthoHalfH = 100;   // 平行投影の上下半幅（ワールド単位）。ズームは camera.zoom で別管理。
 
+// ---------- near/far の動的調整（深度バッファ精度） ----------
+// near=0.01 / far=1e6 の固定値だと比が 1e8 になり、24bit深度の分解能が数十mmまで落ちる。
+// 数mを超えるモデル（ロボコンのフィールド等）では板厚が深度差として表現できず、
+// 面がランダムに前後して「モデルがバラバラの三角形になる」ように見える（Zファイティング）。
+// 実際に見えている範囲（注視点までの距離とシーン半径）に錐台を毎フレーム合わせて精度を確保する。
+let sceneRadius = 100;   // シーン全体のおおよその半径（グリッド込み）。rebuildGrid が更新する。
+function updateCameraClip(){
+  const dist = camera.position.distanceTo(controls.target) || 1;
+  const depth = Math.max(dist + sceneRadius*2, sceneRadius, 1);
+  if(camera === perspCamera){
+    // near は距離の 1/200。注視点より手前に来る面は dist-半径 までなので実用上クリップしない。
+    const near = Math.max(dist/200, 0.01);
+    if(perspCamera.near !== near || perspCamera.far !== depth){
+      perspCamera.near = near; perspCamera.far = depth; perspCamera.updateProjectionMatrix();
+    }
+  } else {
+    // 平行投影の深度は線形。前後対称に必要な分だけ取る。
+    if(orthoCamera.far !== depth || orthoCamera.near !== -depth){
+      orthoCamera.near = -depth; orthoCamera.far = depth; orthoCamera.updateProjectionMatrix();
+    }
+  }
+}
+
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = false;  // ドラッグ時の慣性アニメを無効化
 // ズーム/パンは target（回転中心）までの距離に比例するため、target に寄るほど増分が
@@ -201,6 +224,7 @@ function rebuildGrid(maxDim: number){
   grid.visible = gridVisible;
   scene.add(grid);
   axes.scale.setScalar(Math.max(maxDim*0.6, 30) / 50);
+  sceneRadius = Math.max(half*Math.SQRT2, maxDim, 100);
 }
 rebuildGrid(80);
 
@@ -1606,7 +1630,10 @@ function renderThumb(obj: THREE.Object3D, box: THREE.Box3){
   const r = box.getBoundingSphere(new THREE.Sphere()).radius || 1;
   const d = r / Math.tan(THREE.MathUtils.degToRad(thumbCam!.fov/2)) * 1.4;
   const v = new THREE.Vector3(1,-1,0.8).normalize();
-  thumbCam!.position.copy(c).add(v.multiplyScalar(d)); thumbCam!.lookAt(c); thumbCam!.updateProjectionMatrix();
+  thumbCam!.position.copy(c).add(v.multiplyScalar(d)); thumbCam!.lookAt(c);
+  // 大きなモデルでも深度精度が落ちないよう、錐台を対象の大きさに合わせる（本体の updateCameraClip と同趣旨）
+  thumbCam!.near = Math.max(d/200, 0.01); thumbCam!.far = d + r*2;
+  thumbCam!.updateProjectionMatrix();
   thumbRenderer!.render(thumbScene!, thumbCam!);
   const url = thumbRenderer!.domElement.toDataURL('image/png');
   thumbScene!.remove(obj);
@@ -2873,6 +2900,7 @@ function animate(){
   if(renderRequests <= 0) return;
   renderRequests--;
   applyPixelRatio();
+  updateCameraClip();
   renderer.render(scene, camera);
   renderedFrames++;
 }
