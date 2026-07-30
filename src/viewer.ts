@@ -963,6 +963,11 @@ async function loadUrl(url: string, options: LoadOptions = {}){
         notify(`メッシュが取得できません: ${robot.missing.slice(0,3).join(', ')}`,
           { level:'warning', duration:9000 });
       }
+      // ⚠ ここで **showBusy(null) を自分で消す**。この関数の末尾にある
+      //   showBusy(null) は try/catch の後ろにあるので、途中 return すると
+      //   通らず「配置中…」が出たままになる（3mf の分岐も同じ理由で
+      //   自分で消している）。
+      showBusy(null);
       return true;
     }
     if(name.split('.').pop()!.toLowerCase() === 'gcode'){
