@@ -8,6 +8,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as fflate from 'three/addons/libs/fflate.module.js';
 import { notify } from './lib/notifications';
 import { modelCards, selectedModelId as selectedModelIdStore } from './lib/models';
+import { prestartStepFiles, stepToGlbCached, warmupStepEngine } from './step-loader';
+import type { StepPreviewInfo, StepProgress } from './step-occ';
 
 // ---------- 型定義 ----------
 declare global {
@@ -71,6 +73,8 @@ interface MeshPartSpec {
 interface ParsedMesh {
   geometry: THREE.BufferGeometry;
   parts?: MeshPartSpec[];
+  // 途中経過(プレビュー)モデルを出していた場合、その表示状態を本番モデルへ引き継ぐ
+  previous?: PreviousState | null;
 }
 interface ModelPart extends MeshPartSpec {
   visible: boolean;
@@ -88,6 +92,7 @@ interface PreviousState {
   selected: boolean;
   mtime?: number | null;
   partVisible: Map<string, boolean> | null;
+  fromPreview?: boolean;   // 途中経過モデルの差し替え：カメラを動かさない目印
 }
 interface LoadOptions {
   name?: string;
@@ -97,6 +102,11 @@ interface LoadOptions {
   previous?: PreviousState | null;
   mtime?: number | null;
   parts?: MeshPartSpec[];
+  quiet?: boolean;        // 統計トーストを出さない（途中経過モデル用）
+}
+interface ParseOptions {
+  // 重いSTEPで「途中経過モデル」を先に出してよいか（差し替え対象が既にある場合は出さない）
+  allowPreview?: boolean;
 }
 interface MeasureStart {
   point: THREE.Vector3;
@@ -503,6 +513,9 @@ window.addEventListener('drop', async e=>{
 });
 
 async function loadFiles(files: File[]){
+  // 表示は順番どおりでも、STEPの変換だけ先に並行で走らせる（変換済みならキャッシュを使うので
+  // ここでwasmを取りに行かない＝STEPが全部キャッシュ済みなら13MBのwasmは不要）。
+  prestartSteps(files);
   // バッチ内に result.json があれば gcode の統計として使う
   let resultJson: ResultJson | null = null;
   const rf = files.find(f=> /(^|\/)result\.json$/i.test(f.name) || f.name.toLowerCase()==='result.json');
@@ -549,9 +562,11 @@ async function loadLocalFile(file: File, resultJson: ResultJson | null, options:
       addModel(name, parsedMesh.geometry, { sourceKey:options.sourceKey, previous, mtime, parts:parsedMesh.parts });
       return true;
     }
-    const parsedMesh = await parseBufferWithParts(await file.arrayBuffer(), name);
+    // 差し替え対象（前回の版）が既に画面にあるなら、途中経過は出さずに完成まで今の表示を残す。
+    const allowPreview = !options.sourceKey || !models.some(m=> m.sourceKey === options.sourceKey);
+    const parsedMesh = await parseBufferWithParts(await file.arrayBuffer(), name, { allowPreview });
     showBusy(`配置中… ${name}`); await nextFrame();
-    const previous = takeSourceState(options.sourceKey);
+    const previous = takeSourceState(options.sourceKey) ?? parsedMesh.previous ?? null;
     addModel(name, parsedMesh.geometry, { sourceKey:options.sourceKey, previous, mtime, parts:parsedMesh.parts });
     return true;
   } catch(err){
@@ -827,7 +842,7 @@ async function parseFile(file: File){
 async function parseBuffer(buf: ArrayBuffer, name: string){
   return (await parseBufferWithParts(buf, name)).geometry;
 }
-async function parseBufferWithParts(buf: ArrayBuffer, name: string): Promise<ParsedMesh>{
+async function parseBufferWithParts(buf: ArrayBuffer, name: string, options: ParseOptions = {}): Promise<ParsedMesh>{
   const ext = name.split('.').pop()!.toLowerCase();
   let geometry: THREE.BufferGeometry | null = null, object: THREE.Object3D | null = null;
   if(ext === 'stl')       geometry = new STLLoader().parse(buf);
@@ -837,7 +852,7 @@ async function parseBufferWithParts(buf: ArrayBuffer, name: string): Promise<Par
     // 大容量パスで取れなければ ThreeMFLoader は使わない（1.75GB等で確実に破綻するため）。
     if(!geometry && buf.byteLength <= LARGE_3MF_COMPRESSED) geometry = mergeObject(new ThreeMFLoader().parse(buf));
   }
-  else if(ext === 'step' || ext === 'stp') return await loadStep(buf);
+  else if(ext === 'step' || ext === 'stp') return await loadStep(buf, name, !!options.allowPreview);
   else if(ext === 'glb' || ext === 'gltf') return await loadGltf(buf);
   else throw new Error('未対応の形式: .'+ext);
   if(object && !geometry) geometry = mergeObject(object);
@@ -850,16 +865,20 @@ function sourceNameFor(url: string){
   const pathname = new URL(url, location.href).pathname;
   return decodeURIComponent(pathname.split('/').pop()!) || 'model';
 }
-function takeSourceState(sourceKey: string | undefined): PreviousState | null {
-  if(!sourceKey) return null;
-  const old = models.find(m=>m.sourceKey === sourceKey);
-  if(!old) return null;
-  const keep = {
+// 差し替え時に引き継ぐ表示状態（色・表示/非表示・並び順・選択・部品の表示状態）。
+function captureModelState(old: Model): PreviousState {
+  return {
     color: old.color, visible: old.visible, curLayer: old.curLayer,
     featVisible: old.featVisible ? new Map(old.featVisible) : null, index:models.indexOf(old), id:old.id, selected:old.id===selectedModelId,
     mtime: old.mtime,
     partVisible: old.parts ? new Map(old.parts.map(part=>[part.name, part.visible])) : null,
   };
+}
+function takeSourceState(sourceKey: string | undefined): PreviousState | null {
+  if(!sourceKey) return null;
+  const old = models.find(m=>m.sourceKey === sourceKey);
+  if(!old) return null;
+  const keep = captureModelState(old);
   removeModel(old);
   return keep;
 }
@@ -898,8 +917,9 @@ async function loadUrl(url: string, options: LoadOptions = {}){
           showBusy(null); return;
         }
       }
-      const parsedMesh = await parseBufferWithParts(ab, name);
-      const previous = takeSourceState(sourceKey);
+      const allowPreview = !models.some(m=> m.sourceKey === sourceKey);
+      const parsedMesh = await parseBufferWithParts(ab, name, { allowPreview });
+      const previous = takeSourceState(sourceKey) ?? parsedMesh.previous ?? null;
       addModel(name, parsedMesh.geometry, { sourceKey, sourceUrl:url, previous, mtime, parts:parsedMesh.parts });
     }
   } catch(err){
@@ -965,9 +985,12 @@ async function syncBrowserDirectory(entry: BrowserDirectoryEntry){
         if(old) removeModel(old);
       }
     }
-    for(const item of modelFiles){
+    // 新規・更新されたモデルだけを読み直す。STEPは表示順を待たずに変換を始めておく。
+    const pending = modelFiles.filter(item=>
+      entry.files.get(browserSourceKey(entry, item.path)) !== next.get(browserSourceKey(entry, item.path)));
+    prestartSteps(pending.map(item=> item.file));
+    for(const item of pending){
       const sourceKey = browserSourceKey(entry, item.path);
-      if(entry.files.get(sourceKey) === next.get(sourceKey)) continue;
       const result = resultByDirectory.get(parentPath(item.path));
       await loadLocalFile(item.file, result?.value || null, { sourceKey, name:item.path });
     }
@@ -1079,6 +1102,16 @@ async function reselectBrowserDirectory(entry: BrowserDirectoryEntry){
   try { await syncBrowserDirectory(entry); }
   finally { showBusy(null); }
 }
+// ネイティブのフォルダー選択ダイアログは同時に1つしか開けない。
+// 表示中にもう一度ボタンを押すと showDirectoryPicker が NotAllowedError
+// （File picker already active）で落ちるため、進行中は要求を受け付けない。
+let directoryPickerActive = false;
+function setFolderButtonsBusy(busy: boolean){
+  for(const id of ['openFolderBtn','heroFolderBtn']){
+    const btn = document.getElementById(id) as HTMLButtonElement | null;
+    if(btn) btn.disabled = busy;
+  }
+}
 async function selectBrowserDirectory(){
   if(!window.showDirectoryPicker){
     // 通常はボタン側で振り分けるため到達しないが、安全のため一回読み込みへフォールバック。
@@ -1086,11 +1119,32 @@ async function selectBrowserDirectory(){
     document.getElementById('folderInput')!.click();
     return;
   }
+  if(directoryPickerActive){
+    folderStatus.textContent = 'フォルダー選択ダイアログを表示中です。そちらで選ぶか閉じてください。';
+    return;
+  }
+  directoryPickerActive = true;
+  setFolderButtonsBusy(true);
+  let handle: FileSystemDirectoryHandle;
   try {
-    const handle = await window.showDirectoryPicker({ mode:'read' });
+    handle = await window.showDirectoryPicker({ mode:'read' });
+  } catch(error){
+    const name = (error as Error).name;
+    if(name === 'AbortError') return;      // 選択キャンセル
+    if(name === 'NotAllowedError'){        // すでに別のダイアログが開いている等：静かに諦める
+      folderStatus.textContent = 'フォルダー選択ダイアログを開けませんでした。開いているダイアログを閉じてからもう一度お試しください。';
+      return;
+    }
+    console.error(error);
+    folderStatus.textContent = `フォルダーを開けませんでした: ${(error as Error).message}`;
+    return;
+  } finally {
+    directoryPickerActive = false;
+    setFolderButtonsBusy(false);
+  }
+  try {
     await addBrowserDirectoryHandle(handle);
   } catch(error){
-    if((error as Error).name === 'AbortError') return;  // 選択キャンセル
     console.error(error);
     folderStatus.textContent = `フォルダーを開けませんでした: ${(error as Error).message}`;
   }
@@ -1300,6 +1354,8 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
     notify(`「${handle.name}」に対応モデルが見つかりませんでした。`, { level:'warning', duration:6000 });
     return null;
   }
+  // 選択GUIを見せている間に、STEPがあればCADエンジン(wasm)を裏で取得しておく。
+  warmupOccFor(modelFiles.map(m=> m.path));
   const selected = new Set<string>(preselected ? [...preselected].filter(p=> modelFiles.some(m=>m.path===p)) : []);
 
   return await new Promise<Set<string> | null>((resolve)=>{
@@ -1461,48 +1517,69 @@ function objectPathName(root: THREE.Object3D, obj: THREE.Object3D, fallback: str
 // glTF/GLB を単一ジオメトリへ統合しつつ、各メッシュのマテリアル色（または頂点色）を
 // 頂点カラー属性に焼き込む。glTFのbaseColorはリニア空間なのでそのまま使える。
 // 同時に、後から部品単位で表示/非表示できるよう geometry group の範囲も保持する。
+// STEPのアセンブリはメッシュが1万個を超えることもある（面ごとに分かれるため）。
+// 中間ジオメトリ(toNonIndexed→clone→統合)を作らず、最終バッファへ1回で書き込む。
+// 出力は従来実装とビット一致（position/color/normal・部品範囲すべて同一）。
 function mergeColored(root: THREE.Object3D): ParsedMesh | null {
-  const geoms: { geometry: THREE.BufferGeometry; name: string; color: number }[] = [];
-  let hasColor = false;
+  interface MergeItem { mesh: THREE.Mesh; count: number; color: THREE.Color; name: string; }
+  const items: MergeItem[] = [];
+  let hasColor = false, hasN = true, total = 0;
   root.updateMatrixWorld(true);
+  const fallbackColor = new THREE.Color(0.8,0.8,0.8);
   root.traverse(o=>{
     const om = o as THREE.Mesh;
     if(!om.isMesh || !om.geometry) return;
-    const src = om.geometry.index ? om.geometry.toNonIndexed() : om.geometry.clone();
-    src.applyMatrix4(om.matrixWorld);
-    src.deleteAttribute('uv');
-    const n = src.attributes.position.count;
-    const col = new Float32Array(n*3);
+    const geometry = om.geometry;
+    const position = geometry.getAttribute('position');
+    if(!position) return;
+    const count = geometry.index ? geometry.index.count : position.count;   // 非インデックス化後の頂点数
+    if(!count) return;
     const mat = (Array.isArray(om.material) ? om.material[0] : om.material) as THREE.MeshStandardMaterial;
-    const baseColor = (mat && mat.color) ? mat.color.clone() : new THREE.Color(0.8,0.8,0.8);
-    const existing = src.attributes.color;
-    if(existing){
-      hasColor = true;
-      for(let i=0;i<n;i++){ col[i*3]=existing.getX(i); col[i*3+1]=existing.getY(i); col[i*3+2]=existing.getZ(i); }
-    } else {
-      if(mat && mat.color) hasColor = true;
-      for(let i=0;i<n;i++){ col[i*3]=baseColor.r; col[i*3+1]=baseColor.g; col[i*3+2]=baseColor.b; }
-    }
-    src.setAttribute('color', new THREE.BufferAttribute(col,3));
-    const keep = new THREE.BufferGeometry();
-    keep.setAttribute('position', src.attributes.position.clone());
-    keep.setAttribute('color', src.attributes.color);
-    if(src.attributes.normal) keep.setAttribute('normal', src.attributes.normal.clone());
-    geoms.push({ geometry:keep, name:objectPathName(root, om, `部品 ${geoms.length + 1}`), color:baseColor.getHex() });
-    src.dispose();
+    if(mat && mat.color) hasColor = true;
+    if(geometry.getAttribute('color')) hasColor = true;
+    if(!geometry.getAttribute('normal')) hasN = false;
+    items.push({
+      mesh:om, count,
+      color:(mat && mat.color) ? mat.color.clone() : fallbackColor.clone(),
+      name:objectPathName(root, om, `部品 ${items.length + 1}`),
+    });
+    total += count;
   });
-  if(geoms.length === 0) return null;
-  let total = 0; geoms.forEach(item=> total += item.geometry.attributes.position.count);
+  if(items.length === 0) return null;
   const pos = new Float32Array(total*3), col = new Float32Array(total*3);
-  let hasN = geoms.every(item=>item.geometry.attributes.normal);
   const nor = hasN ? new Float32Array(total*3) : null;
-  let off = 0;
-  geoms.forEach(({ geometry:g })=>{
-    pos.set(g.attributes.position.array, off);
-    col.set(g.attributes.color.array, off);
-    if(hasN) nor!.set(g.attributes.normal.array, off);
-    off += g.attributes.position.array.length;
-  });
+  const normalMatrix = new THREE.Matrix3();
+  let written = 0;
+  for(const item of items){
+    const geometry = item.mesh.geometry;
+    const position = geometry.getAttribute('position')!;
+    const normal = geometry.getAttribute('normal');
+    const color = geometry.getAttribute('color');
+    const index = geometry.index;
+    const m = item.mesh.matrixWorld.elements;
+    normalMatrix.getNormalMatrix(item.mesh.matrixWorld);
+    const nm = normalMatrix.elements;
+    const { r, g, b } = item.color;
+    for(let i=0;i<item.count;i++){
+      const src = index ? index.getX(i) : i;               // インデックスはここで展開する
+      const x = position.getX(src), y = position.getY(src), z = position.getZ(src);
+      const at = (written + i) * 3;
+      pos[at]   = m[0]*x + m[4]*y + m[8] *z + m[12];
+      pos[at+1] = m[1]*x + m[5]*y + m[9] *z + m[13];
+      pos[at+2] = m[2]*x + m[6]*y + m[10]*z + m[14];
+      if(nor && normal){
+        const nx = normal.getX(src), ny = normal.getY(src), nz = normal.getZ(src);
+        const tx = nm[0]*nx + nm[3]*ny + nm[6]*nz;
+        const ty = nm[1]*nx + nm[4]*ny + nm[7]*nz;
+        const tz = nm[2]*nx + nm[5]*ny + nm[8]*nz;
+        const len = Math.sqrt(tx*tx + ty*ty + tz*tz) || 1;
+        nor[at] = tx/len; nor[at+1] = ty/len; nor[at+2] = tz/len;
+      }
+      if(color){ col[at] = color.getX(src); col[at+1] = color.getY(src); col[at+2] = color.getZ(src); }
+      else { col[at] = r; col[at+1] = g; col[at+2] = b; }
+    }
+    written += item.count;
+  }
   // 彩度ブースト：データ(baseColor)は正しいが PBR＋環境光で色が寝るため、
   // 色相を保ったまま luma 基準で彩度だけ少し上げて鮮やかにする。
   if(hasColor && COLOR_SATURATION !== 1){
@@ -1517,21 +1594,19 @@ function mergeColored(root: THREE.Object3D): ParsedMesh | null {
   const merged = new THREE.BufferGeometry();
   merged.setAttribute('position', new THREE.BufferAttribute(pos,3));
   if(hasColor) merged.setAttribute('color', new THREE.BufferAttribute(col,3));
-  if(hasN) merged.setAttribute('normal', new THREE.BufferAttribute(nor!,3)); else merged.computeVertexNormals();
+  if(nor) merged.setAttribute('normal', new THREE.BufferAttribute(nor,3)); else merged.computeVertexNormals();
   const partByName = new Map<string, MeshPartSpec>();
   let vertexStart = 0;
-  geoms.forEach(({ geometry:g, name, color })=>{
-    const count = g.attributes.position.count;
+  for(const { name, count, color } of items){
     let part = partByName.get(name);
     if(!part){
-      part = { name, ranges:[], tri:0, color };
+      part = { name, ranges:[], tri:0, color:color.getHex() };
       partByName.set(name, part);
     }
     part.ranges.push({ start:vertexStart, count });
     part.tri += Math.floor(count / 3);
     vertexStart += count;
-    g.dispose();
-  });
+  }
   const parts = [...partByName.values()].filter(part=>part.tri > 0);
   return { geometry:merged, parts:parts.length > 1 ? parts : undefined };
 }
@@ -1550,62 +1625,89 @@ async function loadGltf(buf: ArrayBuffer | { buffer: ArrayBuffer }){
 // STEP: フル版OCCT (opencascade.js) をブラウザ内で動かし、面ごと色まで解決して
 // 色付き glTF をメモリ上に生成 → GLTFLoader で読む。occt-import-js は面色を読めず
 // ほぼ単色になるため、色を出すにはフルOCCTが要る（詳細は README / step2glb.mjs）。
-// wasm は約48MB(gzip後~13MB)で初回のみCDNから取得・以降ブラウザキャッシュ。
-const OCC_VER = '2.0.0-beta.b5ff984';
-const OCC_BASE = `https://cdn.jsdelivr.net/npm/opencascade.js@${OCC_VER}/dist/`;
-let occPromise: Promise<any> | null = null;
-function loadOCC(): Promise<any> {
-  if(occPromise) return occPromise;
-  occPromise = (async ()=>{
-    // CDNのESMを動的import（Viteにバンドルさせない）。wasmはlocateFileでCDNを指す。
-    const mod = await import(/* @vite-ignore */ OCC_BASE + 'opencascade.full.js');
-    const factory = mod.default;
-    return await new factory({ locateFile: (p: string)=> p.endsWith('.wasm') ? OCC_BASE + 'opencascade.full.wasm' : p });
-  })();
-  return occPromise;
-}
-async function loadStep(buf: ArrayBuffer){
-  showBusy('CADエンジン準備中（初回のみwasm取得 ~13MB）…');
-  const oc = await loadOCC();
-  showBusy('STEP解析中（色付き・曲面メッシュ化）…');
-  await nextFrame();
-  oc.FS.writeFile('/in.step', new Uint8Array(buf));
-  // XCAFドキュメントへ色・名前付きで読み込む
-  const app = oc.XCAFApp_Application.GetApplication().get();
-  const doc = new oc.Handle_TDocStd_Document_1();
-  app.NewDocument_2(new oc.TCollection_ExtendedString_2('MDTV-XCAF', true), doc);
-  const reader = new oc.STEPCAFControl_Reader_1();
-  reader.SetColorMode(true); reader.SetNameMode(true); reader.SetLayerMode(true);
-  if(reader.ReadFile('/in.step') !== oc.IFSelect_ReturnStatus.IFSelect_RetDone) throw new Error('STEP解析に失敗');
-  reader.Transfer_1(doc, new oc.Message_ProgressRange_1());
-  // glTF出力には三角形分割が要る。葉(部品)シェイプをすべてメッシュ化。
-  const main = doc.get().Main();
-  const shapeTool = oc.XCAFDoc_DocumentTool.ShapeTool(main).get();
-  const labels = new oc.TDF_LabelSequence_1();
-  shapeTool.GetShapes(labels);
-  for(let i=1;i<=labels.Length();i++){
-    const lab = labels.Value(i);
-    if(!oc.XCAFDoc_ShapeTool.IsSimpleShape(lab)) continue;
-    const shape = new oc.TopoDS_Shape();
-    if(!oc.XCAFDoc_ShapeTool.GetShape_1(lab, shape)) continue;
-    new oc.BRepMesh_IncrementalMesh_2(shape, 0.1, false, 0.5, false);
-    shape.delete();
+// 変換の実処理は step-occ.ts、ワーカー実行とキャッシュは step-loader.ts。
+const isStepName = (name: string)=>{
+  const ext = name.split('.').pop()!.toLowerCase();
+  return ext === 'step' || ext === 'stp';
+};
+// STEPを読むと分かった時点でwasm取得とワーカー起動を先行させる（初回のみ ~13MB）。
+// ページを開いた瞬間には落とさない：STL/G-codeだけの利用者に13MBを負担させないため、
+// 「フォルダーにSTEPがあった」「STEPを読み込もうとした」時点から裏で取り始める。
+function warmupOccFor(names: Iterable<string>){
+  for(const name of names){
+    if(!isStepName(name)) continue;
+    warmupStepEngine();
+    return;
   }
-  // 色付き glb をメモリに書き出す。単位はmm維持(入出力単位を0.001で揃える)。
-  const writer = new oc.RWGltf_CafWriter(new oc.TCollection_AsciiString_2('/out.glb'), true);
-  const conv = new oc.RWMesh_CoordinateSystemConverter();
-  conv.SetInputLengthUnit(0.001); conv.SetOutputLengthUnit(0.001);
-  writer.SetCoordinateSystemConverter(conv);
-  writer.Perform_2(doc, new oc.TColStd_IndexedDataMapOfStringString_1(), new oc.Message_ProgressRange_1());
-  const glb = oc.FS.readFile('/out.glb'); // Uint8Array
-  const ab = glb.buffer.slice(glb.byteOffset, glb.byteOffset + glb.byteLength);
-  // OCCTのwasmヒープを片付ける（大きいSTEPの連続読込でのリークを抑える）
-  reader.delete(); writer.delete(); conv.delete(); labels.delete();
-  oc.FS.unlink('/in.step'); oc.FS.unlink('/out.glb');
-  const gltf = await new GLTFLoader().parseAsync(ab, '');
+}
+// 表示待ちのSTEPを先に変換し始める（1件あたりの時間は変わらないが、複数なら並行分だけ短縮）。
+function prestartSteps(files: File[]){
+  const steps = files.filter(file=> isStepName(file.name));
+  if(steps.length) void prestartStepFiles(steps);
+}
+function stepBusyText(name: string, p: StepProgress){
+  switch(p.phase){
+    case 'wasm':     return `CADエンジン準備中（初回のみwasm取得 ~13MB）… ${name}`;
+    case 'read':     return `STEP読み取り中… ${name}`;
+    case 'transfer': return p.total
+      ? `STEP形状を構築中 ${p.done ?? 0}/${p.total}… ${name}`
+      : `STEP形状を構築中（重いモデルは時間がかかります）… ${name}`;
+    case 'mesh':     return `曲面をメッシュ化中 ${p.done ?? 0}/${p.total ?? 0}… ${name}`;
+    case 'glb':      return `色付きデータを生成中… ${name}`;
+    case 'cache':    return `変換済みデータを再利用… ${name}`;
+  }
+}
+// 二段表示：重いアセンブリは、転送できた部品だけの「途中経過」を先に出し、
+// 全部品が揃った時点で本番モデルへ差し替える。品質(0.1mm/0.5rad)は途中経過も本番も同じで、
+// 違いは「まだ全部品が出ていない」だけ。単体パーツ(root=1)のSTEPでは途中経過は出ない。
+async function loadStep(buf: ArrayBuffer, name: string, allowPreview: boolean){
+  let previewModel: Model | null = null;
+  let previewBusy = false;      // 前の途中経過を描いている最中は次を捨てる（詰まらせない）
+  let finished = false;
+
+  const dropPreview = ()=>{
+    if(!previewModel) return null;
+    const state = captureModelState(previewModel);
+    state.fromPreview = true;
+    removeModel(previewModel);
+    previewModel = null;
+    return state;
+  };
+  const showPreview = async (glb: ArrayBuffer, info: StepPreviewInfo)=>{
+    if(finished || previewBusy) return;
+    previewBusy = true;
+    try {
+      const gltf = await new GLTFLoader().parseAsync(glb, '');
+      if(finished) return;
+      // 途中経過は部品リストを作らない（1万部品の一覧を何度も組み直すと重いため）
+      const parsed = mergeColored(gltf.scene);
+      if(!parsed || finished) return;
+      const previous = dropPreview();
+      previewModel = addModel(`${name}（読み込み中 ${info.done}/${info.total}）`, parsed.geometry, { previous, quiet:true });
+    } catch(error){
+      console.warn('途中経過の表示に失敗（本番の読み込みは継続）', error);
+    } finally {
+      previewBusy = false;
+    }
+  };
+
+  let glb: ArrayBuffer;
+  try {
+    // 変換はワーカーで走るので、この間もスピナー・進捗・他モデルの操作が動き続ける。
+    glb = await stepToGlbCached(buf, p=> showBusy(stepBusyText(name, p)), allowPreview ? showPreview : undefined);
+  } catch(error){
+    finished = true;
+    dropPreview();
+    throw error;
+  }
+  finished = true;
+  showBusy(`色を反映中… ${name}`);
+  await nextFrame();
+  const gltf = await new GLTFLoader().parseAsync(glb, '');
   const parsed = mergeColored(gltf.scene);
+  const previous = dropPreview();
   if(!parsed) throw new Error('STEPからメッシュを取得できませんでした');
-  return parsed;
+  return { ...parsed, previous };
 }
 
 // ---------- サムネイル生成（モデル一覧の小プレビュー） ----------
@@ -1830,8 +1932,10 @@ function addModel(name: string, geometry: THREE.BufferGeometry, options: LoadOpt
   renderList();
   relayout();
   applyDisplay();
-  if(models.length === 1) fitView();
-  reportLoadStats(m, opt);
+  // 途中経過モデルの差し替えではカメラを動かさない（見ている向き・拡大率を保つ）
+  if(models.length === 1 && !options.previous?.fromPreview) fitView();
+  if(!options.quiet) reportLoadStats(m, opt);
+  return m;
 }
 
 // 重いモデルを読み込んだときだけ、規模と軽量化の効きを通知する（軽いモデルでは邪魔なので出さない）。
