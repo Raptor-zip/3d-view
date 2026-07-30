@@ -5,3 +5,8 @@ __pycache__/
 # step2glb.mjs が生成する変換成果物(再生成可能・巨大)。手置きアセットは別途残す。
 public/*.glb
 *.glb
+
+# 動作確認用に別リポジトリ(NHK-K2026/cad)から複製した URDF 一式。
+# cad 側で `python urdf/tr_urdf.py` と `python scripts/export_meshes.py` を
+# 走らせれば作り直せる（8.9MB あるので追跡しない）。
+public/urdf/

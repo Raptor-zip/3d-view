@@ -5,6 +5,8 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { loadUrdf, setJoint, type UrdfRobot } from './urdf';
+import { robotCards } from './lib/joints';
 import * as fflate from 'three/addons/libs/fflate.module.js';
 import { notify } from './lib/notifications';
 import { modelCards, selectedModelId as selectedModelIdStore } from './lib/models';
@@ -153,6 +155,9 @@ interface Model {
   mat?: THREE.MeshStandardMaterial;
   parts?: ModelPart[];
   flat?: boolean;          // 面法線をシェーダで求める（頂点マージ済み）モデル
+  // URDF（関節つき）モデル専用
+  isRobot?: boolean;
+  robot?: UrdfRobot;
   // G-codeモデル専用
   isGcode?: boolean;
   lineObjs?: LineObj[];
@@ -512,7 +517,36 @@ window.addEventListener('drop', async e=>{
   await Promise.all(dirTasks);
 });
 
+// URDF は `<mesh filename="meshes/x.stl">` のように**外部ファイルを参照する**。
+// ブラウザには相対パスを辿る手段が無いので、同じバッチ（フォルダードロップや
+// 複数選択）で来たファイルを名前で引ける表にしておき、そこから解決する。
+// ⚠ フォルダーごと入れてもらう必要がある。urdf 単体では形が出ない。
+let urdfBatch = new Map<string, File>();
+function registerUrdfBatch(files: File[]){
+  urdfBatch = new Map();
+  for(const f of files){
+    const rel = ((f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name);
+    urdfBatch.set(rel.toLowerCase(), f);
+    urdfBatch.set(rel.split('/').pop()!.toLowerCase(), f);   // 名前だけでも引ける
+  }
+}
+async function resolveUrdfMesh(filename: string): Promise<THREE.BufferGeometry | null>{
+  // package:// も相対パスも、最後の要素（ファイル名）で引く
+  const key = filename.replace(/^package:\/\//, '').split('/').pop()!.toLowerCase();
+  const file = urdfBatch.get(filename.toLowerCase()) || urdfBatch.get(key);
+  if(!file) return null;
+  const ext = key.split('.').pop()!;
+  const buf = await file.arrayBuffer();
+  if(ext === 'stl') return new STLLoader().parse(buf);
+  if(ext === 'obj' || ext === '3mf' || ext === 'glb' || ext === 'gltf'){
+    const parsed = await parseBufferWithParts(buf, key);
+    return parsed.geometry;
+  }
+  return null;
+}
+
 async function loadFiles(files: File[]){
+  registerUrdfBatch(files);
   // 表示は順番どおりでも、STEPの変換だけ先に並行で走らせる（変換済みならキャッシュを使うので
   // ここでwasmを取りに行かない＝STEPが全部キャッシュ済みなら13MBのwasmは不要）。
   prestartSteps(files);
@@ -538,6 +572,19 @@ async function loadLocalFile(file: File, resultJson: ResultJson | null, options:
   markLoadStart();
   await nextFrame();
   try {
+    if(ext === 'urdf'){
+      const robot = await loadUrdf(await file.text(), { resolveMesh: resolveUrdfMesh });
+      showBusy(`配置中… ${name}`); await nextFrame();
+      const previous = takeSourceState(options.sourceKey);
+      addRobot(name, robot, { sourceKey:options.sourceKey, previous, mtime });
+      if(robot.missing.length){
+        notify(`メッシュが見つかりません: ${robot.missing.slice(0,3).join(', ')}`
+          + (robot.missing.length>3 ? ` ほか${robot.missing.length-3}件` : '')
+          + ' — urdf とメッシュはフォルダーごと入れてください',
+          { level:'warning', duration:9000 });
+      }
+      return true;
+    }
     if(ext === 'gcode'){
       const parsed = parseGcode(await file.text());
       showBusy(`配置中… ${name}`); await nextFrame();
@@ -895,6 +942,29 @@ async function loadUrl(url: string, options: LoadOptions = {}){
     // サーバが Last-Modified を返せば更新日時として使う（無ければ null）
     const lm = res.headers.get('last-modified');
     const mtime = lm ? (Date.parse(lm) || null) : null;
+    if(name.split('.').pop()!.toLowerCase() === 'urdf'){
+      // ⚠ メッシュは urdf からの**相対 URL**で辿る。ドロップ経由と違って
+      //   フォルダーを丸ごと入れてもらう必要がない。
+      const robot = await loadUrdf(await res.text(), {
+        resolveMesh: async (filename)=>{
+          const meshUrl = new URL(filename.replace(/^package:\/\//, ''), new URL(url, location.href)).toString();
+          const r = await fetch(meshUrl, { cache:'no-store' });
+          if(!r.ok) return null;
+          const ext = meshUrl.split('.').pop()!.toLowerCase();
+          const buf = await r.arrayBuffer();
+          if(ext === 'stl') return new STLLoader().parse(buf);
+          return (await parseBufferWithParts(buf, meshUrl.split('/').pop()!)).geometry;
+        },
+      });
+      showBusy(`配置中… ${name}`); await nextFrame();
+      const previous = takeSourceState(sourceKey);
+      addRobot(name, robot, { sourceKey, sourceUrl:url, previous, mtime });
+      if(robot.missing.length){
+        notify(`メッシュが取得できません: ${robot.missing.slice(0,3).join(', ')}`,
+          { level:'warning', duration:9000 });
+      }
+      return true;
+    }
     if(name.split('.').pop()!.toLowerCase() === 'gcode'){
       const parsed = parseGcode(await res.text());
       // 同ディレクトリの result.json を試行（無ければ無視）
@@ -933,7 +1003,7 @@ const folderStatus = document.getElementById('folderStatus')!;
 
 // ブラウザが明示的に許可した File System Access API のフォルダー監視。
 // 実パスを露出させず、FileHandle から最新の File を取り直して差分だけ置換する。
-const BROWSER_DIRECTORY_EXTENSIONS = new Set(['stl','step','stp','obj','3mf','glb','gltf','gcode']);
+const BROWSER_DIRECTORY_EXTENSIONS = new Set(['stl','step','stp','obj','3mf','glb','gltf','gcode','urdf']);
 const browserDirectories = new Map<number, BrowserDirectoryEntry>();
 let browserDirectorySequence = 0;
 function parentPath(path: string){ const p=path.lastIndexOf('/'); return p<0 ? '' : path.slice(0,p); }
@@ -1743,6 +1813,12 @@ function renderThumb(obj: THREE.Object3D, box: THREE.Box3){
 }
 function makeThumbnail(m: Model){
   try {
+    if(m.isRobot){
+      const clone = m.robot!.root.clone(true);
+      const box = new THREE.Box3().setFromObject(clone);
+      const url = renderThumb(clone, box);
+      return url;
+    }
     if(m.isGcode){
       const grp = new THREE.Group();
       for(const lo of m.lineObjs!){
@@ -1973,7 +2049,12 @@ function removeModel(m: Model){
   scene.remove(m.group);
   disposeModelDecorations(m);
   m.geometry.dispose();
-  if(m.isGcode){
+  if(m.isRobot){
+    m.robot!.root.traverse(o=>{
+      const mesh = o as THREE.Mesh;
+      if(mesh.isMesh){ mesh.geometry.dispose(); (mesh.material as THREE.Material).dispose(); }
+    });
+  } else if(m.isGcode){
     for(const lo of m.lineObjs!){ lo.obj.geometry.dispose(); lo.mat.dispose(); }
     if(m.travelObj){ m.travelObj.geometry.dispose(); (m.travelObj.material as THREE.Material).dispose(); }
     if(activeGcode === m){
@@ -2128,6 +2209,44 @@ function layerPrefix(layers: number[], nLayers: number){
   for(const lyr of layers){ per[Math.min(lyr,nLayers-1)+1] += 2; }  // 1セグ=2頂点
   for(let i=1;i<per.length;i++) per[i] += per[i-1];
   return per;
+}
+
+// URDF を「関節で動くモデル」として登録する。
+// ⚠ addModel() は形を原点中心・底面 z=0 に正規化するが、ロボットは**リンクの
+//   相対位置が意味を持つ**ので正規化してはいけない。gcode と同じく別経路にする。
+function addRobot(name: string, robot: UrdfRobot, options: LoadOptions = {}){
+  const group = new THREE.Group();
+  group.add(robot.root);
+  robot.root.updateMatrixWorld(true);
+  const bb = new THREE.Box3().setFromObject(robot.root);
+  const size = new THREE.Vector3(); bb.getSize(size);
+  // 底面 z=0・XY 中心へ寄せる（配置は relayout が行う）
+  const c = new THREE.Vector3(); bb.getCenter(c);
+  robot.root.position.set(-c.x, -c.y, -bb.min.z);
+  scene.add(group);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.boundingBox = new THREE.Box3(
+    new THREE.Vector3(-size.x/2,-size.y/2,0), new THREE.Vector3(size.x/2,size.y/2,size.z));
+  geometry.boundingSphere = geometry.boundingBox.getBoundingSphere(new THREE.Sphere());
+  const selectionBox = new THREE.Box3Helper(geometry.boundingBox.clone(), 0x4f9cff); selectionBox.visible=false;
+  const color = options.previous?.color ?? PALETTE[colorCursor++ % PALETTE.length];
+  const label = createModelLabel(name, size, color);
+  group.add(selectionBox, label);
+
+  const m: Model = {
+    id:options.previous?.id ?? ++modelIdCursor,
+    name, group, geometry, isRobot:true, robot, visible:true, size, selectionBox, label,
+    color, tri:Math.round(robot.tri), vert:0, vol:0,
+    sourceKey:options.sourceKey, sourceUrl:options.sourceUrl,
+    mtime:options.mtime ?? options.previous?.mtime ?? null,
+  };
+  if(options.previous) m.visible = options.previous.visible;
+  m.thumb = makeThumbnail(m);
+  insertModel(m, options.previous);
+  if(options.previous?.selected) setSelectedModel(m.id); else updateModelDecorations();
+  renderList(); relayout(); applyDisplay();
+  if(models.length === 1) fitView();
 }
 
 function addGcode(name: string, parsed: ParsedGcode, resultJson: ResultJson | null, options: LoadOptions = {}){
@@ -2393,7 +2512,7 @@ document.getElementById('gcVanish')!.addEventListener('change', e=>{
   if(vanishObj){ scene.remove(vanishObj); vanishObj.geometry.dispose(); (vanishObj.material as THREE.Material).dispose(); vanishObj=null; }
   if(gcVanish && activeGcode) updateVanish(activeGcode);
 });
-function meshAt(){ return models.find(x=> !x.isGcode && x.visible); }
+function meshAt(){ return models.find(x=> !x.isGcode && !x.isRobot && x.visible); }
 function updateVanish(m: Model){
   if(!gcVanish) return;
   if(vanishObj){ scene.remove(vanishObj); vanishObj.geometry.dispose(); (vanishObj.material as THREE.Material).dispose(); vanishObj=null; }
@@ -2504,6 +2623,16 @@ function fmtMtime(ms: number | null | undefined){
 }
 function renderList(){
   syncEmptyState();
+  // 関節パネル（URDF を読んだときだけ出す）
+  const robots = models.filter(m=> m.isRobot);
+  document.getElementById('jointGroup')!.style.display = robots.length ? '' : 'none';
+  robotCards.set(robots.map(m=>({
+    id:m.id, name:m.name,
+    joints:m.robot!.joints.filter(j=> j.type !== 'fixed').map(j=>({
+      name:j.name, type:j.type, lower:j.lower, upper:j.upper, value:j.value,
+      unit: (j.type === 'prismatic' ? 'mm' : 'deg') as 'mm' | 'deg',
+    })),
+  })));
   document.getElementById('mcount')!.textContent = models.length ? `(${models.length})` : '';
   // 名前ラベルは2個以上のときだけ意味を持つので、トグル行も1個以下では隠す。
   document.getElementById('rowLabels')!.style.display = models.length >= 2 ? '' : 'none';
@@ -2519,6 +2648,20 @@ function renderList(){
           { label:'レイヤー', value:String(m.nLayers) }, { label:'時間', value:m.header?.printTime||'—' },
           { label:'X', value:m.size.x.toFixed(1) }, { label:'Y', value:m.size.y.toFixed(1) },
           { label:'Z', value:m.size.z.toFixed(1) }, { label:'重量', value:m.header?.filWeight?m.header.filWeight.toFixed(1)+'g':'—' },
+          ...mtimeDetail,
+        ],
+      };
+    }
+    if(m.isRobot){
+      return {
+        id:m.id, name:m.name, isGcode:false, color:hex, visible:m.visible, thumb:m.thumb||null,
+        opacity:m.opacity ?? 1,
+        details:[
+          { label:'関節', value:String(m.robot!.joints.filter(j=>j.type!=='fixed').length) },
+          { label:'リンク', value:String(m.robot!.links.size) },
+          { label:'三角形', value:f(m.tri) },
+          { label:'X', value:m.size.x.toFixed(1) }, { label:'Y', value:m.size.y.toFixed(1) },
+          { label:'Z', value:m.size.z.toFixed(1) },
           ...mtimeDetail,
         ],
       };
@@ -2540,6 +2683,20 @@ function renderList(){
     };
   }));
 }
+
+window.addEventListener('viewer:joint-action', (event)=>{
+  const { id, action, name, value } = (event as CustomEvent).detail || {};
+  const m = models.find(x=> x.id === id);
+  if(!m || !m.isRobot) return;
+  if(action === 'set-value'){
+    const j = m.robot!.joints.find(x=> x.name === name);
+    if(j) setJoint(j, Number(value));
+  } else if(action === 'reset'){
+    for(const j of m.robot!.joints) setJoint(j, 0);
+  }
+  m.robot!.root.updateMatrixWorld(true);
+  renderList();
+});
 
 window.addEventListener('viewer:model-action', (event)=>{
   const { id, action, value } = (event as CustomEvent).detail || {};
@@ -2608,6 +2765,14 @@ function applyDisplay(){
   const hasGcode = models.some(m=> m.isGcode);
   for(const m of models){
     m.group.visible = m.visible;
+    if(m.isRobot){
+      // ⚠ ロボットはリンクごとにマテリアルが違う。クリップ面だけ配り直す。
+      m.robot!.root.traverse(o=>{
+        const mesh = o as THREE.Mesh;
+        if(mesh.isMesh) (mesh.material as THREE.Material & { clippingPlanes: THREE.Plane[] }).clippingPlanes = planes;
+      });
+      continue;
+    }
     if(m.isGcode){
       for(const lo of m.lineObjs!){ lo.obj.visible = m.featVisible!.get(lo.feature)!; lo.mat.clippingPlanes = planes; }
       if(m.travelObj){ m.travelObj.visible = gcShowTravel; (m.travelObj.material as THREE.Material).clippingPlanes = planes; }
@@ -2829,6 +2994,7 @@ function selectModelAt(event: PointerEvent){
   for(const m of models){
     if(!m.visible) continue;
     if(m.isGcode) candidates.push(...m.lineObjs!.filter(lo=>lo.obj.visible).map(lo=>lo.obj));
+    else if(m.isRobot) candidates.push(m.group);
     else candidates.push(m.mesh!);
   }
   selectionRay.setFromCamera(pointer, camera);
@@ -2920,7 +3086,7 @@ renderer.domElement.addEventListener('dblclick', (e)=>{
   );
   _recenterRay.setFromCamera(ndc, camera);
   const objs: THREE.Object3D[] = [];
-  for(const m of models){ if(!m.visible) continue; objs.push(m.isGcode ? m.group : m.mesh!); }
+  for(const m of models){ if(!m.visible) continue; objs.push((m.isGcode || m.isRobot) ? m.group : m.mesh!); }
   const hits = _recenterRay.intersectObjects(objs, true);
   if(!hits.length) return;
   // カメラ位置は保ったまま target だけ移動 → その点を中心に回り込める
@@ -3008,7 +3174,8 @@ function animate(){
   renderer.render(scene, camera);
   renderedFrames++;
 }
-// 同一オリジンで公開済みのファイルは ?model=foo.stl / ?gcode=plate.gcode（各複数可）で自動ロードできる。
+// 同一オリジンで公開済みのファイルは ?model=foo.stl / ?model=robot.urdf /
+// ?gcode=plate.gcode（各複数可）で自動ロードできる。
 {
   const q = new URLSearchParams(location.search);
   const urls = [...q.getAll('model'), ...q.getAll('gcode')];
