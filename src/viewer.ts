@@ -104,6 +104,7 @@ interface LoadOptions {
   previous?: PreviousState | null;
   mtime?: number | null;
   parts?: MeshPartSpec[];
+  meshes?: Map<string, File>;   // URDF が参照するメッシュの引き当て表（同じバッチのファイル）
   quiet?: boolean;        // 統計トーストを出さない（途中経過モデル用）
 }
 interface ParseOptions {
@@ -521,32 +522,68 @@ window.addEventListener('drop', async e=>{
 // ブラウザには相対パスを辿る手段が無いので、同じバッチ（フォルダードロップや
 // 複数選択）で来たファイルを名前で引ける表にしておき、そこから解決する。
 // ⚠ フォルダーごと入れてもらう必要がある。urdf 単体では形が出ない。
-let urdfBatch = new Map<string, File>();
-function registerUrdfBatch(files: File[]){
-  urdfBatch = new Map();
-  for(const f of files){
-    const rel = ((f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name);
-    urdfBatch.set(rel.toLowerCase(), f);
-    urdfBatch.set(rel.split('/').pop()!.toLowerCase(), f);   // 名前だけでも引ける
+function normalizeRelPath(path: string){
+  const out: string[] = [];
+  for(const seg of path.split('/')){
+    if(!seg || seg === '.') continue;
+    if(seg === '..'){ out.pop(); continue; }
+    out.push(seg);
   }
+  return out.join('/').toLowerCase();
 }
-async function resolveUrdfMesh(filename: string): Promise<THREE.BufferGeometry | null>{
-  // package:// も相対パスも、最後の要素（ファイル名）で引く
-  const key = filename.replace(/^package:\/\//, '').split('/').pop()!.toLowerCase();
-  const file = urdfBatch.get(filename.toLowerCase()) || urdfBatch.get(key);
-  if(!file) return null;
-  const ext = key.split('.').pop()!;
-  const buf = await file.arrayBuffer();
-  if(ext === 'stl') return new STLLoader().parse(buf);
-  if(ext === 'obj' || ext === '3mf' || ext === 'glb' || ext === 'gltf'){
-    const parsed = await parseBufferWithParts(buf, key);
-    return parsed.geometry;
+// バッチ内のファイルを「相対パス」と「ファイル名だけ」の両方で引ける表にする。
+function urdfMeshTable(entries: DirFile[]){
+  const table = new Map<string, File>();
+  for(const { path, file } of entries){
+    const key = normalizeRelPath(path);
+    table.set(key, file);
+    const base = key.split('/').pop()!;
+    if(!table.has(base)) table.set(base, file);   // 名前が重なったら相対パス側を優先
   }
-  return null;
+  return table;
+}
+function fileMeshTable(files: File[]){
+  return urdfMeshTable(files.map(file=> ({
+    path: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name, file,
+  })));
+}
+// urdf に書かれた参照を表の鍵の候補へ展開する。urdf 自身の位置からの相対を先に見て、
+// 駄目ならファイル名だけで引く。`package://pkg/meshes/x.stl` はパッケージ名も落として試す。
+function urdfMeshCandidates(filename: string, baseDir: string){
+  const rel = filename.replace(/^(package|model|file):\/\//, '');
+  const keys: string[] = [];
+  for(const cand of [rel, rel.split('/').slice(1).join('/')]){
+    if(!cand) continue;
+    if(baseDir) keys.push(normalizeRelPath(`${baseDir}/${cand}`));
+    keys.push(normalizeRelPath(cand));
+  }
+  keys.push(normalizeRelPath(rel.split('/').pop()!));
+  return keys;
+}
+// maxBytes はプレビュー用の読み込み量の上限。超えた分は解決せず（＝欠けたまま）返す。
+function urdfMeshResolver(table: Map<string, File>, baseDir: string, maxBytes = Infinity){
+  let remaining = maxBytes;
+  return async (filename: string): Promise<THREE.BufferGeometry | null> => {
+    let file: File | undefined;
+    for(const key of urdfMeshCandidates(filename, baseDir)){
+      file = table.get(key);
+      if(file) break;
+    }
+    if(!file || file.size > remaining) return null;
+    remaining -= file.size;
+    const ext = file.name.split('.').pop()!.toLowerCase();
+    const buf = await file.arrayBuffer();
+    if(ext === 'stl') return new STLLoader().parse(buf);
+    if(ext === 'obj' || ext === '3mf' || ext === 'glb' || ext === 'gltf'){
+      const parsed = await parseBufferWithParts(buf, file.name);
+      return parsed.geometry;
+    }
+    return null;
+  };
 }
 
 async function loadFiles(files: File[]){
-  registerUrdfBatch(files);
+  const meshes = fileMeshTable(files);
   // 表示は順番どおりでも、STEPの変換だけ先に並行で走らせる（変換済みならキャッシュを使うので
   // ここでwasmを取りに行かない＝STEPが全部キャッシュ済みなら13MBのwasmは不要）。
   prestartSteps(files);
@@ -555,7 +592,7 @@ async function loadFiles(files: File[]){
   const rf = files.find(f=> /(^|\/)result\.json$/i.test(f.name) || f.name.toLowerCase()==='result.json');
   if(rf){ try { resultJson = JSON.parse(await rf.text()); } catch(e){ console.warn('result.json 解析失敗', e); } }
   for(let i=0;i<files.length;i++){
-    await loadLocalFile(files[i], resultJson, { progress:`${i+1}/${files.length}` });
+    await loadLocalFile(files[i], resultJson, { progress:`${i+1}/${files.length}`, meshes });
   }
   showBusy(null);
 }
@@ -573,7 +610,9 @@ async function loadLocalFile(file: File, resultJson: ResultJson | null, options:
   await nextFrame();
   try {
     if(ext === 'urdf'){
-      const robot = await loadUrdf(await file.text(), { resolveMesh: resolveUrdfMesh });
+      const robot = await loadUrdf(await file.text(), {
+        resolveMesh: urdfMeshResolver(options.meshes ?? fileMeshTable([file]), parentPath(name)),
+      });
       showBusy(`配置中… ${name}`); await nextFrame();
       const previous = takeSourceState(options.sourceKey);
       addRobot(name, robot, { sourceKey:options.sourceKey, previous, mtime });
@@ -1032,6 +1071,9 @@ async function syncBrowserDirectory(entry: BrowserDirectoryEntry){
   entry.syncing = true;
   try {
     const found = await collectBrowserDirectoryFiles(entry.handle);
+    // ⚠ URDF のメッシュは**選択されていなくても**要る。選んだモデルだけに絞る前の
+    //   フォルダー全体から表を作らないと、urdf を選んでも形が出ない。
+    const meshes = urdfMeshTable(found);
     const resultByDirectory = new Map<string, { value: ResultJson; stamp: string }>();
     for(const item of found){
       if(item.file.name.toLowerCase() !== 'result.json') continue;
@@ -1067,7 +1109,7 @@ async function syncBrowserDirectory(entry: BrowserDirectoryEntry){
     for(const item of pending){
       const sourceKey = browserSourceKey(entry, item.path);
       const result = resultByDirectory.get(parentPath(item.path));
-      await loadLocalFile(item.file, result?.value || null, { sourceKey, name:item.path });
+      await loadLocalFile(item.file, result?.value || null, { sourceKey, name:item.path, meshes });
     }
     entry.files = next;
     entry.modelCount = modelFiles.length;
@@ -1383,12 +1425,31 @@ async function makeStlFileThumbnail(file: File, token: number): Promise<Thumbnai
   if(token !== dirPickerToken){ geometry.dispose(); return { url:null }; }
   return { url:meshThumbFromGeometry(geometry) };
 }
-async function makeFileThumbnail(file: File, name: string, token: number): Promise<ThumbnailResult> {
+// URDF はフォルダー内のメッシュを集めて組み上げてから撮る。読み込み量は上限つき
+// （足りない分は欠けたまま撮る）で、重いロボットでも選択画面を止めない。
+async function makeUrdfThumbnail(file: File, name: string, meshes: Map<string, File>, token: number): Promise<ThumbnailResult> {
+  const robot = await loadUrdf(await file.text(), {
+    resolveMesh: urdfMeshResolver(meshes, parentPath(name), PREVIEW_FULL_PARSE_MAX_BYTES),
+  });
+  const dispose = ()=> robot.root.traverse(obj=>{
+    const mesh = obj as THREE.Mesh;
+    if(!mesh.isMesh) return;
+    mesh.geometry.dispose();
+    for(const mat of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) mat.dispose();
+  });
+  if(token !== dirPickerToken){ dispose(); return { url:null }; }
+  if(!robot.tri){ dispose(); return { url:null, message:'URDF\nメッシュなし' }; }
+  const url = renderThumb(robot.root, new THREE.Box3().setFromObject(robot.root));
+  dispose();
+  return { url };
+}
+async function makeFileThumbnail(file: File, name: string, token: number, meshes: Map<string, File>): Promise<ThumbnailResult> {
   const ext = name.split('.').pop()!.toLowerCase();
   const skip = skipPreviewMessage(file, ext);
   if(skip) return { url:null, message:skip };
   try {
     if(ext === 'stl') return await makeStlFileThumbnail(file, token);
+    if(ext === 'urdf') return await makeUrdfThumbnail(file, name, meshes, token);
     if(ext === 'gcode'){
       const text = await file.text();
       if(token !== dirPickerToken) return { url:null };
@@ -1431,6 +1492,7 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
   }
   // 選択GUIを見せている間に、STEPがあればCADエンジン(wasm)を裏で取得しておく。
   warmupOccFor(modelFiles.map(m=> m.path));
+  const meshes = urdfMeshTable(files);   // urdf のプレビューはフォルダー全体からメッシュを引く
   const selected = new Set<string>(preselected ? [...preselected].filter(p=> modelFiles.some(m=>m.path===p)) : []);
 
   return await new Promise<Set<string> | null>((resolve)=>{
@@ -1534,7 +1596,7 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
     (async ()=>{
       for(const item of modelFiles){
         if(token !== dirPickerToken) return;
-        const result = await makeFileThumbnail(item.file, item.path, token);
+        const result = await makeFileThumbnail(item.file, item.path, token, meshes);
         if(token !== dirPickerToken) return;
         const ref = cardByPath.get(item.path);
         if(!ref) continue;
