@@ -84,8 +84,11 @@ interface ModelPart extends MeshPartSpec {
   normalMat: THREE.MeshNormalMaterial;
   backfaceMat: THREE.MeshBasicMaterial;
 }
+// ロボットの色の出し方。urdf=URDF が指定した色 / links=リンクごとに塗り分け / solid=モデル色で単色。
+type RobotColorMode = 'urdf' | 'links' | 'solid';
 interface PreviousState {
   color: number;
+  colorMode?: RobotColorMode;
   visible: boolean;
   curLayer?: number;
   featVisible: Map<string, boolean> | null;
@@ -159,6 +162,7 @@ interface Model {
   // URDF（関節つき）モデル専用
   isRobot?: boolean;
   robot?: UrdfRobot;
+  colorMode?: RobotColorMode;
   // G-codeモデル専用
   isGcode?: boolean;
   lineObjs?: LineObj[];
@@ -954,7 +958,7 @@ function sourceNameFor(url: string){
 // 差し替え時に引き継ぐ表示状態（色・表示/非表示・並び順・選択・部品の表示状態）。
 function captureModelState(old: Model): PreviousState {
   return {
-    color: old.color, visible: old.visible, curLayer: old.curLayer,
+    color: old.color, colorMode: old.colorMode, visible: old.visible, curLayer: old.curLayer,
     featVisible: old.featVisible ? new Map(old.featVisible) : null, index:models.indexOf(old), id:old.id, selected:old.id===selectedModelId,
     mtime: old.mtime,
     partVisible: old.parts ? new Map(old.parts.map(part=>[part.name, part.visible])) : null,
@@ -2278,6 +2282,56 @@ function layerPrefix(layers: number[], nLayers: number){
   return per;
 }
 
+// ---------- ロボットの色 ----------
+function robotMeshes(robot: UrdfRobot){
+  const out: THREE.Mesh[] = [];
+  robot.root.traverse(o=>{ const mesh = o as THREE.Mesh; if(mesh.isMesh) out.push(mesh); });
+  return out;
+}
+// 一覧のチップやラベルに出す代表色。URDF が指定した色のうち一番多いものを使う。
+function robotBaseColor(robot: UrdfRobot){
+  const count = new Map<number, number>();
+  for(const mesh of robotMeshes(robot)){
+    const c = (mesh.userData.baseColor as number) ?? 0xbfc4cc;
+    count.set(c, (count.get(c) ?? 0) + 1);
+  }
+  let best = 0xbfc4cc, most = -1;
+  for(const [c, n] of count) if(n > most){ best = c; most = n; }
+  return best;
+}
+// リンクごとの色分けはリンクの出現順にパレットを配る（同じ URDF なら毎回同じ色になる）。
+function robotLinkColors(robot: UrdfRobot){
+  const byLink = new Map<string, number>();
+  for(const mesh of robotMeshes(robot)){
+    const link = String(mesh.userData.link ?? mesh.name);
+    if(!byLink.has(link)) byLink.set(link, PALETTE[byLink.size % PALETTE.length]);
+  }
+  return byLink;
+}
+function applyRobotColor(m: Model){
+  const mode = m.colorMode ?? 'urdf';
+  const byLink = mode === 'links' ? robotLinkColors(m.robot!) : null;
+  for(const mesh of robotMeshes(m.robot!)){
+    const mat = mesh.material as THREE.MeshStandardMaterial;
+    if(mode === 'urdf') mat.color.setHex((mesh.userData.baseColor as number) ?? 0xbfc4cc);
+    else if(byLink) mat.color.setHex(byLink.get(String(mesh.userData.link ?? mesh.name))!);
+    else mat.color.setHex(m.color);
+  }
+  invalidate();
+}
+// 色チップを押したときの巡回：URDF の色 → リンクごと → 単色（パレット順）→ URDF の色。
+function cycleRobotColor(m: Model){
+  const mode = m.colorMode ?? 'urdf';
+  if(mode === 'urdf'){ m.colorMode = 'links'; }
+  else if(mode === 'links'){ m.colorMode = 'solid'; m.color = PALETTE[0]; }
+  else {
+    const next = (PALETTE.indexOf(m.color) + 1) % PALETTE.length;
+    if(next === 0){ m.colorMode = 'urdf'; m.color = robotBaseColor(m.robot!); }
+    else m.color = PALETTE[next];
+  }
+  applyRobotColor(m);
+}
+
 // URDF を「関節で動くモデル」として登録する。
 // ⚠ addModel() は形を原点中心・底面 z=0 に正規化するが、ロボットは**リンクの
 //   相対位置が意味を持つ**ので正規化してはいけない。gcode と同じく別経路にする。
@@ -2297,18 +2351,21 @@ function addRobot(name: string, robot: UrdfRobot, options: LoadOptions = {}){
     new THREE.Vector3(-size.x/2,-size.y/2,0), new THREE.Vector3(size.x/2,size.y/2,size.z));
   geometry.boundingSphere = geometry.boundingBox.getBoundingSphere(new THREE.Sphere());
   const selectionBox = new THREE.Box3Helper(geometry.boundingBox.clone(), 0x4f9cff); selectionBox.visible=false;
-  const color = options.previous?.color ?? PALETTE[colorCursor++ % PALETTE.length];
+  // 既定は URDF が書いた色。パレットを勝手に当てず、色チップで塗り替えられるようにする。
+  const colorMode: RobotColorMode = options.previous?.colorMode ?? 'urdf';
+  const color = options.previous?.color ?? robotBaseColor(robot);
   const label = createModelLabel(name, size, color);
   group.add(selectionBox, label);
 
   const m: Model = {
     id:options.previous?.id ?? ++modelIdCursor,
     name, group, geometry, isRobot:true, robot, visible:true, size, selectionBox, label,
-    color, tri:Math.round(robot.tri), vert:0, vol:0,
+    color, colorMode, tri:Math.round(robot.tri), vert:0, vol:0,
     sourceKey:options.sourceKey, sourceUrl:options.sourceUrl,
     mtime:options.mtime ?? options.previous?.mtime ?? null,
   };
   if(options.previous) m.visible = options.previous.visible;
+  applyRobotColor(m);          // 差し替え時は前の塗り分けを引き継ぐ（サムネもこの色で撮る）
   m.thumb = makeThumbnail(m);
   insertModel(m, options.previous);
   if(options.previous?.selected) setSelectedModel(m.id); else updateModelDecorations();
@@ -2720,8 +2777,12 @@ function renderList(){
       };
     }
     if(m.isRobot){
+      // リンクごとの塗り分け中はチップも多色にして、いまどの出し方かが分かるようにする。
+      const chip = m.colorMode === 'links'
+        ? `linear-gradient(135deg, ${PALETTE.slice(0,4).map(c=> '#'+c.toString(16).padStart(6,'0')).join(', ')})`
+        : hex;
       return {
-        id:m.id, name:m.name, isGcode:false, color:hex, visible:m.visible, thumb:m.thumb||null,
+        id:m.id, name:m.name, isGcode:false, color:chip, visible:m.visible, thumb:m.thumb||null,
         opacity:m.opacity ?? 1,
         details:[
           { label:'関節', value:String(m.robot!.joints.filter(j=>j.type!=='fixed').length) },
@@ -2771,6 +2832,10 @@ window.addEventListener('viewer:model-action', (event)=>{
   if(!m) return;
   if(action==='select'){ setSelectedModel(m.id); return; }
   if(action==='activate' && m.isGcode){ setSelectedModel(m.id); activeGcode = m; buildGcodePanel(m); return; }
+  if(action==='cycle-color' && m.isRobot){
+    // ⚠ ロボットには m.mat が無い。単色モデルと同じ経路に流すと落ちる。
+    cycleRobotColor(m); refreshModelLabel(m); setSelectedModel(m.id); renderList(); return;
+  }
   if(action==='cycle-color' && !m.isGcode){
     m.color = PALETTE[(PALETTE.indexOf(m.color)+1) % PALETTE.length];
     // インポート色（頂点カラー）を持つモデルは、ユーザーが明示的に色を選んだら単色に切替える。
@@ -2833,11 +2898,16 @@ function applyDisplay(){
   for(const m of models){
     m.group.visible = m.visible;
     if(m.isRobot){
-      // ⚠ ロボットはリンクごとにマテリアルが違う。クリップ面だけ配り直す。
-      m.robot!.root.traverse(o=>{
-        const mesh = o as THREE.Mesh;
-        if(mesh.isMesh) (mesh.material as THREE.Material & { clippingPlanes: THREE.Plane[] }).clippingPlanes = planes;
-      });
+      // ⚠ ロボットはリンクごとにマテリアルが違う。共通設定は1枚ずつ配り直す。
+      const ghostOp = (gcGhost && hasGcode) ? 0.18 : (state.opacity ? 0.45 : 1.0);
+      const modelOp = Math.min(ghostOp, m.opacity ?? 1);
+      for(const mesh of robotMeshes(m.robot!)){
+        const mat = mesh.material as THREE.MeshStandardMaterial;
+        mat.clippingPlanes = planes;
+        // URDF が rgba で半透明を指定していたら、そちらとモデル側の指定の濃い方を採る。
+        const op = Math.min(modelOp, (mesh.userData.baseOpacity as number) ?? 1);
+        mat.transparent = op < 1; mat.opacity = op; mat.depthWrite = !(op < 1);
+      }
       continue;
     }
     if(m.isGcode){

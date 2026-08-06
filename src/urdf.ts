@@ -58,6 +58,28 @@ function applyOrigin(node: THREE.Object3D, el: Element | null): void {
   node.quaternion.setFromEuler(new THREE.Euler(rpy.x, rpy.y, rpy.z, 'ZYX'));
 }
 
+/** `<material>` の色。`<color rgba="r g b a">` が無ければ null（名前だけの参照はここでは解けない） */
+function materialSpec(el: Element | null): { color: THREE.Color; opacity: number } | null {
+  const rgba = el?.querySelector('color')?.getAttribute('rgba');
+  if (!rgba) return null;
+  const p = rgba.trim().split(/\s+/).map(v => Number.parseFloat(v));
+  if (p.length < 3 || p.slice(0, 3).some(v => !Number.isFinite(v))) return null;
+  // ⚠ URDF の rgba は **sRGB の 0..1**。three の作業色空間へは sRGB として渡す
+  //   （setRGB の既定はリニアなので、そのまま入れると全体が白く浮く）。
+  const color = new THREE.Color().setRGB(p[0], p[1], p[2], THREE.SRGBColorSpace);
+  const a = Number.parseFloat(String(p[3]));
+  return { color, opacity: Number.isFinite(a) ? Math.min(1, Math.max(0, a)) : 1 };
+}
+/** visual の material を解決する。`<material name="x"/>` だけなら robot 直下の定義を引く。 */
+function visualMaterial(vis: Element, named: Map<string, { color: THREE.Color; opacity: number }>) {
+  const el = vis.querySelector(':scope > material');
+  if (!el) return null;
+  const inline = materialSpec(el);
+  if (inline) return inline;
+  const ref = el.getAttribute('name');
+  return ref ? named.get(ref) ?? null : null;
+}
+
 function primitive(geo: Element): THREE.BufferGeometry | null {
   const box = geo.querySelector('box');
   if (box) {
@@ -90,6 +112,14 @@ export async function loadUrdf(xmlText: string, opt: UrdfLoadOptions): Promise<U
   const missing: string[] = [];
   let tri = 0;
 
+  // robot 直下の名前付き material。visual からは `<material name="x"/>` と名前だけで参照できる。
+  const named = new Map<string, { color: THREE.Color; opacity: number }>();
+  for (const el of Array.from(robotEl.querySelectorAll(':scope > material'))) {
+    const spec = materialSpec(el);
+    const nm = el.getAttribute('name');
+    if (nm && spec) named.set(nm, spec);
+  }
+
   for (const linkEl of Array.from(robotEl.querySelectorAll(':scope > link'))) {
     const name = linkEl.getAttribute('name') || `link${links.size}`;
     const linkObj = new THREE.Object3D();
@@ -110,10 +140,18 @@ export async function loadUrdf(xmlText: string, opt: UrdfLoadOptions): Promise<U
       }
       if (!geom) continue;
       if (!geom.attributes.normal) geom.computeVertexNormals();
+      const spec = visualMaterial(vis, named);
       const mat = opt.material ? opt.material(name)
-        : new THREE.MeshStandardMaterial({ color: 0xbfc4cc, metalness: 0.05, roughness: 0.65, side: THREE.DoubleSide });
+        : new THREE.MeshStandardMaterial({
+          color: spec ? spec.color : 0xbfc4cc, metalness: 0.05, roughness: 0.65, side: THREE.DoubleSide,
+          transparent: !!spec && spec.opacity < 1, opacity: spec?.opacity ?? 1,
+        });
       const mesh = new THREE.Mesh(geom, mat);
       mesh.name = `${name}/visual`;
+      // ビューア側が「URDF が指定した色」へ戻したり、リンク単位で塗り分けたりするための控え。
+      mesh.userData.link = name;
+      mesh.userData.baseColor = (mat as THREE.MeshStandardMaterial).color?.getHex() ?? 0xbfc4cc;
+      mesh.userData.baseOpacity = spec?.opacity ?? 1;
       applyOrigin(mesh, vis.querySelector('origin'));
       if (meshScale) mesh.scale.copy(meshScale);
       linkObj.add(mesh);
