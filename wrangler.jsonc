@@ -1,0 +1,23 @@
+{
+  // Cloudflare Workers（静的アセットのみ）。https://3d-view.raptor-s.workers.dev
+  //
+  //     npm run build      # dist/ を作る（mounts.json の複製も含む）
+  //     npx wrangler deploy
+  //
+  // ⚠ サーバ側の処理は無い。`dist/` をそのまま配るだけのワーカで、
+  //   STEP 変換もメッシュ解析も**ブラウザの中**で動く（README のとおり）。
+  // ⚠ `not_found_handling` を single-page-application から変えないこと。
+  //   `/?model=...` は `/` なので効かないが、将来パス付きの URL を足したとき
+  //   これが無いと 404 になる。
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "3d-view",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}

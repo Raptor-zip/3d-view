@@ -1,8 +1,11 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { localMounts } from './scripts/vite-mounts';
 
 export default defineConfig({
-  plugins: [svelte()],
+  // localMounts: mounts.json に書いたリポジトリ外のフォルダーを開発サーバへ生やす。
+  // URDF のように外部メッシュを相対参照する形式を ?model= で開くために要る。
+  plugins: [svelte(), localMounts()],
   server: {
     host: '127.0.0.1',
     port: 8000,

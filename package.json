@@ -6,10 +6,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/sync-mounts.mjs && vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "step2glb": "node step2glb.mjs"
+    "step2glb": "node step2glb.mjs",
+    "mounts:sync": "node scripts/sync-mounts.mjs"
   },
   "dependencies": {
     "svelte": "^5.56.3",
@@ -17,6 +18,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@types/node": "^26.1.2",
     "@types/three": "^0.160.0",
     "opencascade.js": "2.0.0-beta.b5ff984",
     "svelte-check": "^4.6.0",

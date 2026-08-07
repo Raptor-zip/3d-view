@@ -9,4 +9,12 @@ public/*.glb
 # 動作確認用に別リポジトリ(NHK-K2026/cad)から複製した URDF 一式。
 # cad 側で `python urdf/tr_urdf.py` と `python scripts/export_meshes.py` を
 # 走らせれば作り直せる（8.9MB あるので追跡しない）。
+# ⚠ 複製は古くなる。いまは mounts.json で元フォルダーを直接配信できる（README 参照）。
 public/urdf/
+
+# 各自の環境の絶対パスなので共有しない。README の「外部フォルダーを URL で開く」参照。
+mounts.json
+
+# mounts.json のフォルダーを本番ビルド用に複製したもの（`npm run build` が作る）。
+# 元は別リポジトリの生成物なので追跡しない。
+public/local/

@@ -63,7 +63,44 @@ bambu-slice スキルが吐く `out/slice/plate_1.gcode` をそのまま投入�
 http://localhost:8000/?gcode=/samples/plate_1.gcode
 # STLと重ねたい場合（オーバーレイ）:
 http://localhost:8000/?model=/samples/model.stl&gcode=/samples/plate_1.gcode
+# URDF（色・関節つき）も同じ。メッシュは urdf からの相対URLで自動取得する:
+http://localhost:8000/?model=/local/nhk-tr/tr.urdf
 ```
+
+### 外部フォルダーを URL で開く（`mounts.json`・開発サーバのみ）
+
+**URDF は外部メッシュを相対パスで参照する**ので、`.urdf` を1個ドロップしても形は出ない
+（`meshes/*.stl` を辿れない）。かといって別リポジトリの出力を `public/` へコピーすると、
+**CAD を出し直すたびに古くなる**。そこでリポジトリ外のフォルダーを開発サーバへ直接生やす。
+
+リポジトリ直下に `mounts.json`（gitignore 済み・各自の絶対パス）を置く:
+
+```json
+{
+  "nhk-tr": "/home/you/RoboCon/NHK-K2026/cad/urdf"
+}
+```
+
+`npm run dev` すると `/local/<名前>/` として配信され、起動ログにそのまま貼れる URL が出る:
+
+```
+外部フォルダー (mounts.json):
+➜  /local/nhk-tr/  →  /home/you/RoboCon/NHK-K2026/cad/urdf
+   http://127.0.0.1:8000/?model=/local/nhk-tr/tr.urdf
+```
+
+毎リクエストで元フォルダーを読むので、**CAD を出し直したらリロードだけで反映される**。
+`mounts.json` を書き換えたときもサーバの再起動は要らない。
+
+⚠ `public/` へ手でコピーする方式に戻さないこと。Vite は**起動時に** `public/` の一覧を作るため、
+後から増えたファイルは「無い」と判定され、SPA フォールバックで **index.html が 200 で**返る。
+STL パーサが HTML を読んで `RangeError: Invalid typed array length` という無関係な例外で落ちる。
+
+**本番ビルドにも同じパスで入る。** `npm run build` が `scripts/sync-mounts.mjs` を呼び、
+`mounts.json` の各フォルダーを `public/local/<名前>/` へ複製してから Vite を回す。
+開発と公開で URL が変わらないので、**共有したリンクが「手元では出るのに公開版では出ない」に
+ならない**。複製されるのは表示に使う拡張子だけ（`.urdf` `.stl` `.step` `.gcode` など）で、
+`.py` などのソースは運ばない。`public/local/` は生成物なので追跡しない。
 
 ### フォルダーの一括表示・自動更新
 
