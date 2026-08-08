@@ -100,7 +100,12 @@ STL パーサが HTML を読んで `RangeError: Invalid typed array length` と�
 `mounts.json` の各フォルダーを `public/local/<名前>/` へ複製してから Vite を回す。
 開発と公開で URL が変わらないので、**共有したリンクが「手元では出るのに公開版では出ない」に
 ならない**。複製されるのは表示に使う拡張子だけ（`.urdf` `.stl` `.step` `.gcode` など）で、
-`.py` などのソースは運ばない。`public/local/` は生成物なので追跡しない。
+`.py` などのソースは運ばない。
+
+Cloudflare の Git 連携ビルドは開発者個人の `mounts.json` や兄弟リポジトリを読めないため、
+公開用の `public/local/nhk-tr/` はこのリポジトリにも同梱している。CIで `mounts.json` が無い場合は
+`sync-mounts.mjs` が同梱版を保持し、ローカルで `mounts.json` がある場合だけ CAD の最新出力へ
+差し替える。
 
 ### フォルダーの一括表示・自動更新
 

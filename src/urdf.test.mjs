@@ -1,5 +1,5 @@
 // URDF パーサの検算（ブラウザを開かずに確かめる）。
-//   node src/urdf.test.mjs public/urdf/tr.urdf
+//   node src/urdf.test.mjs public/local/nhk-tr/tr.urdf
 //
 // ⚠ ブラウザでしか動かないものを「動くはず」で置いておくと、実際に開いた
 //   ときに黙って何も出ない。関節の木・軸・可動範囲・メッシュ参照だけでも
@@ -7,7 +7,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
-const path = process.argv[2] || 'public/urdf/tr.urdf';
+const path = process.argv[2] || 'public/local/nhk-tr/tr.urdf';
 const xml = readFileSync(path, 'utf8');
 const base = dirname(path);
 

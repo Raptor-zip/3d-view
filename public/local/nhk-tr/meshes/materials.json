@@ -1,0 +1,704 @@
+{
+ "base_link": [
+  {
+   "file": "base_link__STEEL.stl",
+   "material": "STEEL",
+   "rgba": [
+    0.35,
+    0.37,
+    0.4,
+    1.0
+   ],
+   "solids": 307
+  },
+  {
+   "file": "base_link__SUS304.stl",
+   "material": "SUS304",
+   "rgba": [
+    0.55,
+    0.58,
+    0.62,
+    1.0
+   ],
+   "solids": 187
+  },
+  {
+   "file": "base_link__A5052.stl",
+   "material": "A5052",
+   "rgba": [
+    0.78,
+    0.8,
+    0.83,
+    1.0
+   ],
+   "solids": 90
+  },
+  {
+   "file": "base_link__ADC12.stl",
+   "material": "ADC12",
+   "rgba": [
+    0.46,
+    0.49,
+    0.53,
+    1.0
+   ],
+   "solids": 50
+  },
+  {
+   "file": "base_link__A6005C.stl",
+   "material": "A6005C",
+   "rgba": [
+    0.62,
+    0.66,
+    0.7,
+    1.0
+   ],
+   "solids": 40
+  },
+  {
+   "file": "base_link__PETG.stl",
+   "material": "PETG",
+   "rgba": [
+    0.98,
+    0.42,
+    0.66,
+    1.0
+   ],
+   "solids": 19
+  },
+  {
+   "file": "base_link__MOTOR.stl",
+   "material": "MOTOR",
+   "rgba": [
+    0.2,
+    0.2,
+    0.22,
+    1.0
+   ],
+   "solids": 18
+  },
+  {
+   "file": "base_link__CABLE.stl",
+   "material": "CABLE",
+   "rgba": [
+    0.12,
+    0.12,
+    0.14,
+    1.0
+   ],
+   "solids": 13
+  },
+  {
+   "file": "base_link__RUBBER.stl",
+   "material": "RUBBER",
+   "rgba": [
+    0.18,
+    0.18,
+    0.18,
+    1.0
+   ],
+   "solids": 11
+  },
+  {
+   "file": "base_link__PC.stl",
+   "material": "PC",
+   "rgba": [
+    0.72,
+    0.86,
+    0.92,
+    1.0
+   ],
+   "solids": 7
+  },
+  {
+   "file": "base_link__PCB.stl",
+   "material": "PCB",
+   "rgba": [
+    0.1,
+    0.45,
+    0.25,
+    1.0
+   ],
+   "solids": 7
+  },
+  {
+   "file": "base_link__PP_DANPLA.stl",
+   "material": "PP_DANPLA",
+   "rgba": [
+    0.86,
+    0.9,
+    0.84,
+    1.0
+   ],
+   "solids": 5
+  },
+  {
+   "file": "base_link__SILICONE.stl",
+   "material": "SILICONE",
+   "rgba": [
+    0.9,
+    0.35,
+    0.2,
+    1.0
+   ],
+   "solids": 5
+  },
+  {
+   "file": "base_link__SENSOR.stl",
+   "material": "SENSOR",
+   "rgba": [
+    0.3,
+    0.32,
+    0.36,
+    1.0
+   ],
+   "solids": 3
+  },
+  {
+   "file": "base_link__URETHANE.stl",
+   "material": "URETHANE",
+   "rgba": [
+    0.25,
+    0.22,
+    0.24,
+    1.0
+   ],
+   "solids": 3
+  },
+  {
+   "file": "base_link__MASCOT_TRIM.stl",
+   "material": "MASCOT_TRIM",
+   "rgba": [
+    0.85,
+    0.26,
+    0.28,
+    1.0
+   ],
+   "solids": 3
+  },
+  {
+   "file": "base_link__POM.stl",
+   "material": "POM",
+   "rgba": [
+    0.95,
+    0.95,
+    0.92,
+    1.0
+   ],
+   "solids": 2
+  },
+  {
+   "file": "base_link__ESTOP.stl",
+   "material": "ESTOP",
+   "rgba": [
+    0.85,
+    0.12,
+    0.12,
+    1.0
+   ],
+   "solids": 2
+  },
+  {
+   "file": "base_link__MASCOT_DARK.stl",
+   "material": "MASCOT_DARK",
+   "rgba": [
+    0.14,
+    0.14,
+    0.17,
+    1.0
+   ],
+   "solids": 2
+  },
+  {
+   "file": "base_link__MASCOT_RAG.stl",
+   "material": "MASCOT_RAG",
+   "rgba": [
+    0.7,
+    0.73,
+    0.68,
+    1.0
+   ],
+   "solids": 2
+  },
+  {
+   "file": "base_link__TEKCELL.stl",
+   "material": "TEKCELL",
+   "rgba": [
+    0.93,
+    0.89,
+    0.76,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "base_link__BATTERY.stl",
+   "material": "BATTERY",
+   "rgba": [
+    0.15,
+    0.18,
+    0.35,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "base_link__SCREEN.stl",
+   "material": "SCREEN",
+   "rgba": [
+    0.13,
+    0.22,
+    0.3,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "base_link__PLYWOOD.stl",
+   "material": "PLYWOOD",
+   "rgba": [
+    0.8,
+    0.66,
+    0.44,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "base_link__MASCOT_SUIT.stl",
+   "material": "MASCOT_SUIT",
+   "rgba": [
+    0.2,
+    0.36,
+    0.62,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "base_link__MASCOT.stl",
+   "material": "MASCOT",
+   "rgba": [
+    0.95,
+    0.85,
+    0.55,
+    1.0
+   ],
+   "solids": 1
+  }
+ ],
+ "wheel_left": [
+  {
+   "file": "wheel_left__STEEL.stl",
+   "material": "STEEL",
+   "rgba": [
+    0.35,
+    0.37,
+    0.4,
+    1.0
+   ],
+   "solids": 4
+  },
+  {
+   "file": "wheel_left__A6005C.stl",
+   "material": "A6005C",
+   "rgba": [
+    0.62,
+    0.66,
+    0.7,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "wheel_left__URETHANE.stl",
+   "material": "URETHANE",
+   "rgba": [
+    0.25,
+    0.22,
+    0.24,
+    1.0
+   ],
+   "solids": 1
+  }
+ ],
+ "wheel_right": [
+  {
+   "file": "wheel_right__STEEL.stl",
+   "material": "STEEL",
+   "rgba": [
+    0.35,
+    0.37,
+    0.4,
+    1.0
+   ],
+   "solids": 4
+  },
+  {
+   "file": "wheel_right__A6005C.stl",
+   "material": "A6005C",
+   "rgba": [
+    0.62,
+    0.66,
+    0.7,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "wheel_right__URETHANE.stl",
+   "material": "URETHANE",
+   "rgba": [
+    0.25,
+    0.22,
+    0.24,
+    1.0
+   ],
+   "solids": 1
+  }
+ ],
+ "turret_yaw": [
+  {
+   "file": "turret_yaw__STEEL.stl",
+   "material": "STEEL",
+   "rgba": [
+    0.35,
+    0.37,
+    0.4,
+    1.0
+   ],
+   "solids": 78
+  },
+  {
+   "file": "turret_yaw__A5052.stl",
+   "material": "A5052",
+   "rgba": [
+    0.78,
+    0.8,
+    0.83,
+    1.0
+   ],
+   "solids": 30
+  },
+  {
+   "file": "turret_yaw__A6005C.stl",
+   "material": "A6005C",
+   "rgba": [
+    0.62,
+    0.66,
+    0.7,
+    1.0
+   ],
+   "solids": 3
+  },
+  {
+   "file": "turret_yaw__RUBBER.stl",
+   "material": "RUBBER",
+   "rgba": [
+    0.18,
+    0.18,
+    0.18,
+    1.0
+   ],
+   "solids": 3
+  },
+  {
+   "file": "turret_yaw__MOTOR.stl",
+   "material": "MOTOR",
+   "rgba": [
+    0.2,
+    0.2,
+    0.22,
+    1.0
+   ],
+   "solids": 2
+  }
+ ],
+ "shooter_pitch": [
+  {
+   "file": "shooter_pitch__STEEL.stl",
+   "material": "STEEL",
+   "rgba": [
+    0.35,
+    0.37,
+    0.4,
+    1.0
+   ],
+   "solids": 53
+  },
+  {
+   "file": "shooter_pitch__A5052.stl",
+   "material": "A5052",
+   "rgba": [
+    0.78,
+    0.8,
+    0.83,
+    1.0
+   ],
+   "solids": 22
+  },
+  {
+   "file": "shooter_pitch__PETG.stl",
+   "material": "PETG",
+   "rgba": [
+    0.98,
+    0.42,
+    0.66,
+    1.0
+   ],
+   "solids": 6
+  },
+  {
+   "file": "shooter_pitch__MOTOR.stl",
+   "material": "MOTOR",
+   "rgba": [
+    0.2,
+    0.2,
+    0.22,
+    1.0
+   ],
+   "solids": 3
+  },
+  {
+   "file": "shooter_pitch__RUBBER.stl",
+   "material": "RUBBER",
+   "rgba": [
+    0.18,
+    0.18,
+    0.18,
+    1.0
+   ],
+   "solids": 2
+  }
+ ],
+ "roller": [
+  {
+   "file": "roller__URETHANE.stl",
+   "material": "URETHANE",
+   "rgba": [
+    0.25,
+    0.22,
+    0.24,
+    1.0
+   ],
+   "solids": 5
+  },
+  {
+   "file": "roller__PETG.stl",
+   "material": "PETG",
+   "rgba": [
+    0.98,
+    0.42,
+    0.66,
+    1.0
+   ],
+   "solids": 5
+  },
+  {
+   "file": "roller__A6005C.stl",
+   "material": "A6005C",
+   "rgba": [
+    0.62,
+    0.66,
+    0.7,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "roller__A5052.stl",
+   "material": "A5052",
+   "rgba": [
+    0.78,
+    0.8,
+    0.83,
+    1.0
+   ],
+   "solids": 1
+  }
+ ],
+ "singulator": [
+  {
+   "file": "singulator__PETG.stl",
+   "material": "PETG",
+   "rgba": [
+    0.98,
+    0.42,
+    0.66,
+    1.0
+   ],
+   "solids": 5
+  },
+  {
+   "file": "singulator__URETHANE.stl",
+   "material": "URETHANE",
+   "rgba": [
+    0.25,
+    0.22,
+    0.24,
+    1.0
+   ],
+   "solids": 5
+  },
+  {
+   "file": "singulator__A5052.stl",
+   "material": "A5052",
+   "rgba": [
+    0.78,
+    0.8,
+    0.83,
+    1.0
+   ],
+   "solids": 2
+  },
+  {
+   "file": "singulator__MOTOR_SHAFT.stl",
+   "material": "MOTOR_SHAFT",
+   "rgba": [
+    0.85,
+    0.72,
+    0.3,
+    1.0
+   ],
+   "solids": 1
+  }
+ ],
+ "grabber_slide": [
+  {
+   "file": "grabber_slide__STEEL.stl",
+   "material": "STEEL",
+   "rgba": [
+    0.35,
+    0.37,
+    0.4,
+    1.0
+   ],
+   "solids": 50
+  },
+  {
+   "file": "grabber_slide__A5052.stl",
+   "material": "A5052",
+   "rgba": [
+    0.78,
+    0.8,
+    0.83,
+    1.0
+   ],
+   "solids": 17
+  },
+  {
+   "file": "grabber_slide__A6005C.stl",
+   "material": "A6005C",
+   "rgba": [
+    0.62,
+    0.66,
+    0.7,
+    1.0
+   ],
+   "solids": 8
+  },
+  {
+   "file": "grabber_slide__MOTOR.stl",
+   "material": "MOTOR",
+   "rgba": [
+    0.2,
+    0.2,
+    0.22,
+    1.0
+   ],
+   "solids": 1
+  }
+ ],
+ "grabber_press": [
+  {
+   "file": "grabber_press__STEEL.stl",
+   "material": "STEEL",
+   "rgba": [
+    0.35,
+    0.37,
+    0.4,
+    1.0
+   ],
+   "solids": 6
+  },
+  {
+   "file": "grabber_press__A5052.stl",
+   "material": "A5052",
+   "rgba": [
+    0.78,
+    0.8,
+    0.83,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "grabber_press__SPONGE.stl",
+   "material": "SPONGE",
+   "rgba": [
+    0.94,
+    0.9,
+    0.86,
+    1.0
+   ],
+   "solids": 1
+  }
+ ],
+ "fork": [
+  {
+   "file": "fork__STEEL.stl",
+   "material": "STEEL",
+   "rgba": [
+    0.35,
+    0.37,
+    0.4,
+    1.0
+   ],
+   "solids": 30
+  },
+  {
+   "file": "fork__SUS304.stl",
+   "material": "SUS304",
+   "rgba": [
+    0.55,
+    0.58,
+    0.62,
+    1.0
+   ],
+   "solids": 5
+  },
+  {
+   "file": "fork__A5052.stl",
+   "material": "A5052",
+   "rgba": [
+    0.78,
+    0.8,
+    0.83,
+    1.0
+   ],
+   "solids": 2
+  },
+  {
+   "file": "fork__A6005C.stl",
+   "material": "A6005C",
+   "rgba": [
+    0.62,
+    0.66,
+    0.7,
+    1.0
+   ],
+   "solids": 1
+  },
+  {
+   "file": "fork__PETG.stl",
+   "material": "PETG",
+   "rgba": [
+    0.98,
+    0.42,
+    0.66,
+    1.0
+   ],
+   "solids": 1
+  }
+ ]
+}

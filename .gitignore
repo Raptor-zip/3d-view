@@ -15,6 +15,5 @@ public/urdf/
 # 各自の環境の絶対パスなので共有しない。README の「外部フォルダーを URL で開く」参照。
 mounts.json
 
-# mounts.json のフォルダーを本番ビルド用に複製したもの（`npm run build` が作る）。
-# 元は別リポジトリの生成物なので追跡しない。
-public/local/
+# `public/local/nhk-tr/` は Cloudflare の Git ビルドでも配信するため追跡する。
+# 他のローカルマウントを追加する場合は、生成物のため個別に無視してよい。

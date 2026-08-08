@@ -51,9 +51,11 @@ function copyDir(src, dst) {
 }
 
 function main() {
-  rmSync(DST_ROOT, { recursive: true, force: true });
   if (!existsSync(CONFIG)) {
-    console.log('mounts.json が無いので public/local/ は作らない');
+    // Cloudflare の Git ビルドには開発者個人の mounts.json は存在しない。
+    // リポジトリに同梱した公開用アセットを残し、クリーンビルドでも
+    // /local/<name>/ が消えないようにする。
+    console.log('mounts.json が無いので、同梱済み public/local/ をそのまま使う');
     return 0;
   }
   let raw;
@@ -63,6 +65,9 @@ function main() {
     console.error(`mounts.json を読めません: ${error.message}`);
     return 1;
   }
+
+  // ローカル用の mounts.json がある場合だけ生成物を同期する。
+  rmSync(DST_ROOT, { recursive: true, force: true });
 
   let total = 0;
   for (const [name, value] of Object.entries(raw)) {
