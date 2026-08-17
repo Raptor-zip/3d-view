@@ -1625,7 +1625,7 @@ async function openModelPicker(label: string, files: DirFile[], preselected: Set
     };
 
     // --- プレビューの遅延生成（見えているカードだけ、順番に）---
-    interface CardRef { thumb: HTMLDivElement; cb: HTMLInputElement; item: DirFile; done: boolean; queued: boolean; }
+    interface CardRef { card: HTMLElement; thumb: HTMLDivElement; cb: HTMLInputElement; item: DirFile; ext: string; done: boolean; queued: boolean; }
     const cardByEl = new Map<Element, CardRef>();
     const queue: CardRef[] = [];
     let pumping = false;
@@ -1691,7 +1691,7 @@ async function openModelPicker(label: string, files: DirFile[], preselected: Set
       const meta = document.createElement('div'); meta.className = 'dp-meta'; meta.append(nm, sub);
       card.append(cb, thumb, meta);
       grid.append(card);
-      const ref: CardRef = { thumb, cb, item, done:false, queued:false };
+      const ref: CardRef = { card, thumb, cb, item, ext, done:false, queued:false };
       cardByPath.set(item.path, ref);
       // 見えているカードだけを順にプレビューする（数百件でも初期表示が固まらない）。
       cardByEl.set(card, ref);
@@ -1708,16 +1708,63 @@ async function openModelPicker(label: string, files: DirFile[], preselected: Set
     closeBtn.onclick = ()=> finish(null);
     head.append(title, hsub, closeBtn);
 
+    // --- 絞り込み（拡張子チップ＋名前検索）---
+    const extCounts = new Map<string, number>();
+    for(const item of modelFiles){
+      const e = item.file.name.split('.').pop()!.toLowerCase();
+      extCounts.set(e, (extCounts.get(e) ?? 0) + 1);
+    }
+    const activeExts = new Set<string>();   // 空 = すべて
+    let query = '';
+    const matches = (ref: CardRef)=>
+      (activeExts.size === 0 || activeExts.has(ref.ext))
+      && (query === '' || ref.item.path.toLowerCase().includes(query));
+    const visibleRefs = ()=> [...cardByPath.values()].filter(matches);
+
+    const filters = document.createElement('div'); filters.className = 'dp-filters';
+    const chips = new Map<string, HTMLButtonElement>();
+    const syncFilter = ()=>{
+      let shown = 0;
+      for(const ref of cardByPath.values()){
+        const on = matches(ref);
+        ref.card.classList.toggle('hide', !on);
+        if(on) shown++;
+      }
+      for(const [ext, chip] of chips) chip.classList.toggle('on', activeExts.has(ext));
+      allChip.classList.toggle('on', activeExts.size === 0);
+      filterCount.textContent = shown === modelFiles.length ? '' : `${shown} / ${modelFiles.length} 件を表示`;
+      updateCount();
+    };
+    const allChip = document.createElement('button'); allChip.className = 'dp-chip on';
+    allChip.textContent = `すべて (${modelFiles.length})`;
+    allChip.onclick = ()=>{ activeExts.clear(); syncFilter(); };
+    filters.append(allChip);
+    for(const [ext, n] of [...extCounts].sort((a,b)=> b[1]-a[1] || a[0].localeCompare(b[0]))){
+      const chip = document.createElement('button'); chip.className = 'dp-chip';
+      chip.textContent = `.${ext} (${n})`;
+      chip.title = `.${ext} だけに絞る（クリックで追加・解除）`;
+      chip.onclick = ()=>{
+        if(activeExts.has(ext)) activeExts.delete(ext); else activeExts.add(ext);
+        syncFilter();
+      };
+      chips.set(ext, chip);
+      filters.append(chip);
+    }
+    const search = document.createElement('input'); search.type = 'search'; search.className = 'dp-search';
+    search.placeholder = '名前で絞り込み';
+    search.oninput = ()=>{ query = search.value.trim().toLowerCase(); syncFilter(); };
+    const filterCount = document.createElement('span'); filterCount.className = 'dp-filtercount';
+    filters.append(search, filterCount);
+
     const tools = document.createElement('div'); tools.className = 'dp-tools';
-    const allBtn = document.createElement('button'); allBtn.className = 'dp-tool'; allBtn.textContent = '全選択';
-    const noneBtn = document.createElement('button'); noneBtn.className = 'dp-tool'; noneBtn.textContent = '全解除';
+    const allBtn = document.createElement('button'); allBtn.className = 'dp-tool'; allBtn.textContent = '表示中を全選択';
+    const noneBtn = document.createElement('button'); noneBtn.className = 'dp-tool'; noneBtn.textContent = '表示中を全解除';
     const stopPreviewBtn = document.createElement('button'); stopPreviewBtn.className = 'dp-tool'; stopPreviewBtn.textContent = 'プレビュー停止';
+    // 全選択／全解除は「いま絞り込みで見えているもの」に効かせる（.urdf だけ全部選ぶ、が一発でできる）。
     const setAll = (on: boolean)=>{
-      selected.clear();
-      for(const item of modelFiles){
-        const ref = cardByPath.get(item.path)!;
-        ref.cb.checked = on; ref.cb.closest('.dp-card')!.classList.toggle('sel', on);
-        if(on) selected.add(item.path);
+      for(const ref of visibleRefs()){
+        ref.cb.checked = on; ref.card.classList.toggle('sel', on);
+        if(on) selected.add(ref.item.path); else selected.delete(ref.item.path);
       }
       updateCount();
     };
@@ -1759,7 +1806,8 @@ async function openModelPicker(label: string, files: DirFile[], preselected: Set
     foot.append(countLabel, cancelBtn, okBtn);
     updateCount();
 
-    panel.append(head, tools, grid, foot);
+    panel.append(head, filters, tools, grid, foot);
+    syncFilter();
     // 背景クリック（パネル外）でキャンセル
     dirPicker.onclick = (e)=>{ if(e.target === dirPicker) finish(null); };
     dirPicker.textContent = ''; dirPicker.append(panel); dirPicker.classList.add('show');
