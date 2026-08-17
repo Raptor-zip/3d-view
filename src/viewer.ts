@@ -508,8 +508,8 @@ document.getElementById('folderInput')!.onchange = async (e)=>{
   if(!files.length) return;
   // 監視非対応ブラウザでもフォルダーの中身から見るモデルを選べるよう、選択GUIを通す。
   const picked = await pickFromFolderFiles(toDirFiles(files));
-  if(!picked || !picked.length) return;
-  await loadFiles(picked);
+  if(!picked || !picked.files.length) return;
+  await loadFiles(picked.files, picked.meshes);
   if(models.length > 1) setLayout('grid', true);
 };
 
@@ -552,7 +552,7 @@ async function collectDroppedEntryFiles(entry: FileSystemEntry, prefix=''): Prom
   return [];
 }
 // File のリストから選択GUIを出し、読み込むファイルだけを返す。
-async function pickFromFolderFiles(entries: DirFile[], label?: string): Promise<File[] | null>{
+async function pickFromFolderFiles(entries: DirFile[], label?: string): Promise<PickedFiles | null>{
   const first = entries[0]?.path ?? '';
   const name = label ?? (first.includes('/') ? first.split('/')[0] : 'フォルダー');
   return openFileListPicker(name, entries);
@@ -585,7 +585,7 @@ window.addEventListener('drop', async e=>{
         dirTasks.push(collectDroppedEntryFiles(entry).then(async files=>{
           if(!files.length) return;
           const picked = await pickFromFolderFiles(files, entry.name);
-          if(picked && picked.length) await loadFiles(picked);
+          if(picked && picked.files.length) await loadFiles(picked.files, picked.meshes);
         }));
       }
     } else {
@@ -661,8 +661,10 @@ function urdfMeshResolver(table: Map<string, File>, baseDir: string, maxBytes = 
   };
 }
 
-async function loadFiles(files: File[]){
-  const meshes = fileMeshTable(files);
+// meshTable を渡すと、読み込むのは files だけのまま、urdf のメッシュ解決だけを
+// フォルダー全体から行える（選択GUIで urdf だけ選んだ場合に使う）。
+async function loadFiles(files: File[], meshTable?: Map<string, File>){
+  const meshes = meshTable ?? fileMeshTable(files);
   // 表示は順番どおりでも、STEPの変換だけ先に並行で走らせる（変換済みならキャッシュを使うので
   // ここでwasmを取りに行かない＝STEPが全部キャッシュ済みなら13MBのwasmは不要）。
   prestartSteps(files);
@@ -1576,14 +1578,16 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
 }
 // ハンドルを持たない経路（webkitdirectory・非対応ブラウザへのフォルダードロップ）からも
 // 同じ選択GUIを出せるよう、File のリストだけで開ける版。
-async function openFileListPicker(label: string, files: DirFile[]): Promise<File[] | null>{
+interface PickedFiles { files: File[]; meshes: Map<string, File>; }
+async function openFileListPicker(label: string, files: DirFile[]): Promise<PickedFiles | null>{
   const chosen = await openModelPicker(label, files, undefined, ++dirPickerToken);
   if(!chosen) return null;
   const byPath = new Map(files.map(f=> [f.path, f.file]));
-  // urdf は同フォルダーのメッシュを必要とするので、選ばれた urdf があれば非モデルも含めて全部渡す。
   const picked = [...chosen].map(p=> byPath.get(p)!).filter(Boolean);
-  if(picked.some(f=> f.name.toLowerCase().endsWith('.urdf'))) return files.map(f=> f.file);
-  return picked;
+  // gcode の統計に使う result.json は選択対象外なので、あれば一緒に渡す。
+  const extra = files.filter(f=> f.file.name.toLowerCase() === 'result.json').map(f=> f.file);
+  // 読み込むのは選ばれたファイルだけ。urdf が参照するメッシュはフォルダー全体の表から引く。
+  return { files: [...picked, ...extra], meshes: urdfMeshTable(files) };
 }
 async function openModelPicker(label: string, files: DirFile[], preselected: Set<string> | undefined, token: number): Promise<Set<string> | null>{
   const modelFiles = files
