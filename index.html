@@ -205,7 +205,18 @@
   .dp-tools .dp-tool:hover { border-color:var(--accent); }
   .dp-tools .dp-tool:disabled { opacity:.45; cursor:not-allowed; border-color:var(--line); }
   .dp-tools .dp-toolhint { font-size:11px; color:var(--muted); }
-  .dp-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(128px,1fr)); gap:10px; padding:14px 16px; overflow-y:auto; }
+  .dp-grid { display:grid; gap:10px; padding:14px 16px; overflow-y:auto; }
+  .dp-grid.gallery { grid-template-columns:repeat(auto-fill,minmax(128px,1fr)); }
+  /* リスト表示：1行1ファイル。小さなサムネ＋名前＋種別/サイズ */
+  .dp-grid.list { grid-template-columns:1fr; gap:4px; }
+  .dp-grid.list .dp-card { flex-direction:row; align-items:center; gap:10px; padding:6px 8px 6px 30px; }
+  .dp-grid.list .dp-check { top:50%; transform:translateY(-50%); left:9px; }
+  .dp-grid.list .dp-thumb { width:40px; height:40px; flex:none; aspect-ratio:auto; }
+  .dp-grid.list .dp-thumb .dp-noimg { font-size:8px; }
+  .dp-grid.list .dp-thumb .dp-spin { width:14px; height:14px; }
+  .dp-grid.list .dp-meta { min-width:0; flex:1; display:flex; align-items:baseline; gap:10px; }
+  .dp-grid.list .dp-name { margin-top:0; flex:1; min-width:0; font-size:12px; }
+  .dp-grid.list .dp-sub { margin-top:0; white-space:nowrap; }
   .dp-card { position:relative; display:flex; flex-direction:column; background:#2a2e35; border:1px solid var(--line); border-radius:7px; padding:8px; cursor:pointer; user-select:none; }
   .dp-card:hover { border-color:#55606e; }
   .dp-card.sel { border-color:var(--accent); background:rgba(79,156,255,.12); }

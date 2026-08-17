@@ -179,7 +179,65 @@ type StateBoolKey = 'solid' | 'wire' | 'edges' | 'normal' | 'backface' | 'opacit
 
 // ---------- シーン基盤 ----------
 const viewEl = document.getElementById('view')!;
-const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+
+// 致命エラーを画面に出す（コンソールを開かないと分からない状態にしない）
+function showFatalError(title: string, detail: string){
+  const prev = document.getElementById('fatalError');
+  if(prev) prev.remove();
+  const box = document.createElement('div');
+  box.id = 'fatalError';
+  box.setAttribute('style', [
+    'position:fixed','inset:0','z-index:99999','display:flex',
+    'align-items:center','justify-content:center','padding:24px',
+    'background:rgba(16,18,21,.96)','color:#e6e8eb','overflow:auto',
+    'font-family:system-ui,"Hiragino Sans","Noto Sans JP",sans-serif',
+  ].join(';'));
+  const inner = document.createElement('div');
+  inner.setAttribute('style','max-width:760px;width:100%');
+  const h = document.createElement('div');
+  h.setAttribute('style','font-size:18px;font-weight:700;color:#ff8a7a;margin-bottom:10px');
+  h.textContent = title;
+  const p = document.createElement('pre');
+  p.setAttribute('style','white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.6;background:#24272e;border:1px solid #3a3e46;border-radius:8px;padding:12px;margin:0;color:#e6e8eb');
+  p.textContent = detail;
+  inner.append(h, p);
+  box.appendChild(inner);
+  document.body.appendChild(box);
+}
+
+function createRenderer(): THREE.WebGLRenderer {
+  try {
+    return new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+  } catch(e){
+    const msg = e instanceof Error ? (e.message || String(e)) : String(e);
+    showFatalError('3D 表示を開始できません（WebGL が使えません）', [
+      msg,
+      '',
+      'よくある原因と対処:',
+      '・ブラウザのハードウェアアクセラレーションが無効 → 設定で有効にして再起動',
+      '・GPU ドライバー／サンドボックスの問題 → ブラウザを再起動、別ブラウザで試す',
+      '・chrome://gpu で WebGL の状態を確認',
+    ].join('\n'));
+    throw e;
+  }
+}
+
+const renderer = createRenderer();
+renderer.domElement.addEventListener('webglcontextlost', (ev) => {
+  ev.preventDefault();
+  showFatalError('WebGL コンテキストが失われました', 'GPU の再初期化やドライバーのクラッシュが考えられます。ページを再読み込みしてください。');
+});
+window.addEventListener('error', (ev) => {
+  if(document.getElementById('fatalError')) return;
+  const e = ev.error;
+  const msg = e instanceof Error ? `${e.message}\n\n${e.stack ?? ''}` : String(ev.message ?? e);
+  showFatalError('予期しないエラーが発生しました', msg);
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  if(document.getElementById('fatalError')) return;
+  const r: unknown = ev.reason;
+  showFatalError('予期しないエラーが発生しました', r instanceof Error ? `${r.message}\n\n${r.stack ?? ''}` : String(r));
+});
 renderer.localClippingEnabled = true;   // ピクセル比は resize()/applyPixelRatio() が設定する
 viewEl.appendChild(renderer.domElement);
 
@@ -448,7 +506,10 @@ document.getElementById('panelBackdrop')!.onclick = ()=> document.body.classList
 document.getElementById('folderInput')!.onchange = async (e)=>{
   const files = [...(e.target as HTMLInputElement).files!]; (e.target as HTMLInputElement).value='';
   if(!files.length) return;
-  await loadFiles(files);
+  // 監視非対応ブラウザでもフォルダーの中身から見るモデルを選べるよう、選択GUIを通す。
+  const picked = await pickFromFolderFiles(toDirFiles(files));
+  if(!picked || !picked.length) return;
+  await loadFiles(picked);
   if(models.length > 1) setLayout('grid', true);
 };
 
@@ -480,14 +541,24 @@ function readAllDirectoryEntries(reader: FileSystemDirectoryReader){
     read();
   });
 }
-async function collectDroppedEntryFiles(entry: FileSystemEntry): Promise<File[]>{
-  if(entry.isFile) return [await readEntryFile(entry as FileSystemFileEntry)];
+async function collectDroppedEntryFiles(entry: FileSystemEntry, prefix=''): Promise<DirFile[]>{
+  const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+  if(entry.isFile) return [{ path, file: await readEntryFile(entry as FileSystemFileEntry) }];
   if(entry.isDirectory){
     const children = await readAllDirectoryEntries((entry as FileSystemDirectoryEntry).createReader());
-    const nested = await Promise.all(children.map(collectDroppedEntryFiles));
+    const nested = await Promise.all(children.map(child=> collectDroppedEntryFiles(child, path)));
     return nested.flat();
   }
   return [];
+}
+// File のリストから選択GUIを出し、読み込むファイルだけを返す。
+async function pickFromFolderFiles(entries: DirFile[], label?: string): Promise<File[] | null>{
+  const first = entries[0]?.path ?? '';
+  const name = label ?? (first.includes('/') ? first.split('/')[0] : 'フォルダー');
+  return openFileListPicker(name, entries);
+}
+function toDirFiles(files: File[]): DirFile[]{
+  return files.map(file=> ({ path: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name, file }));
 }
 
 window.addEventListener('drop', async e=>{
@@ -511,7 +582,11 @@ window.addEventListener('drop', async e=>{
         ).catch(err=> console.error('フォルダーのドロップに失敗', err)));
       } else {
         // 非対応ブラウザ：再帰読み込みで一回だけ取り込む。
-        dirTasks.push(collectDroppedEntryFiles(entry).then(files=>{ if(files.length) return loadFiles(files); }));
+        dirTasks.push(collectDroppedEntryFiles(entry).then(async files=>{
+          if(!files.length) return;
+          const picked = await pickFromFolderFiles(files, entry.name);
+          if(picked && picked.length) await loadFiles(picked);
+        }));
       }
     } else {
       const f = item.getAsFile();
@@ -1478,6 +1553,16 @@ function fmtBytes(bytes: number){
   if(bytes < 1048576) return `${(bytes/1024).toFixed(0)} KB`;
   return `${(bytes/1048576).toFixed(1)} MB`;
 }
+// 一覧の表示形式。ファイル数が多いとサムネ生成が重いので、既定はリスト。
+type PickerView = 'list' | 'grid';
+const PICKER_VIEW_KEY = 'dirPicker.view';
+const PICKER_GRID_MAX = 24;   // これ以下なら既定でギャラリー表示
+function loadPickerView(count: number): PickerView {
+  const saved = localStorage.getItem(PICKER_VIEW_KEY);
+  if(saved === 'list' || saved === 'grid') return saved;
+  return count > PICKER_GRID_MAX ? 'list' : 'grid';
+}
+
 // プレビュー一覧を出し、表示モデルを選ばせる。解決値は選択パスの Set（表示）／null（キャンセル）。
 async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselected?: Set<string>): Promise<Set<string> | null>{
   const token = ++dirPickerToken;
@@ -1487,11 +1572,25 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
   catch(err){ showBusy(null); folderStatus.textContent = `フォルダーを開けませんでした: ${(err as Error).message}`; return null; }
   showBusy(null);
   if(token !== dirPickerToken) return null;   // 途中で別の選択が始まった
+  return openModelPicker(handle.name, files, preselected, token);
+}
+// ハンドルを持たない経路（webkitdirectory・非対応ブラウザへのフォルダードロップ）からも
+// 同じ選択GUIを出せるよう、File のリストだけで開ける版。
+async function openFileListPicker(label: string, files: DirFile[]): Promise<File[] | null>{
+  const chosen = await openModelPicker(label, files, undefined, ++dirPickerToken);
+  if(!chosen) return null;
+  const byPath = new Map(files.map(f=> [f.path, f.file]));
+  // urdf は同フォルダーのメッシュを必要とするので、選ばれた urdf があれば非モデルも含めて全部渡す。
+  const picked = [...chosen].map(p=> byPath.get(p)!).filter(Boolean);
+  if(picked.some(f=> f.name.toLowerCase().endsWith('.urdf'))) return files.map(f=> f.file);
+  return picked;
+}
+async function openModelPicker(label: string, files: DirFile[], preselected: Set<string> | undefined, token: number): Promise<Set<string> | null>{
   const modelFiles = files
     .filter(item=> BROWSER_DIRECTORY_EXTENSIONS.has(item.file.name.split('.').pop()!.toLowerCase()))
     .sort((a,b)=> a.path.localeCompare(b.path));
   if(!modelFiles.length){
-    notify(`「${handle.name}」に対応モデルが見つかりませんでした。`, { level:'warning', duration:6000 });
+    notify(`「${label}」に対応モデルが見つかりませんでした。`, { level:'warning', duration:6000 });
     return null;
   }
   // 選択GUIを見せている間に、STEPがあればCADエンジン(wasm)を裏で取得しておく。
@@ -1504,6 +1603,7 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
     const finish = (value: Set<string> | null)=>{
       if(settled) return; settled = true;
       dirPickerToken++;                                   // 進行中のサムネ生成を打ち切る
+      stopped = true; queue.length = 0; io.disconnect();
       window.removeEventListener('keydown', onKey);
       dirPicker.classList.remove('show'); dirPicker.textContent = '';
       resolve(value);
@@ -1520,14 +1620,59 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
       okBtn.disabled = selected.size === 0;
     };
 
-    // --- 一覧グリッド ---
-    const grid = document.createElement('div'); grid.className = 'dp-grid';
-    const cardByPath = new Map<string, { thumb: HTMLDivElement; cb: HTMLInputElement }>();
+    // --- プレビューの遅延生成（見えているカードだけ、順番に）---
+    interface CardRef { thumb: HTMLDivElement; cb: HTMLInputElement; item: DirFile; done: boolean; queued: boolean; }
+    const cardByEl = new Map<Element, CardRef>();
+    const queue: CardRef[] = [];
+    let pumping = false;
+    let stopped = false;
+    const enqueue = (ref: CardRef)=>{
+      if(ref.done || ref.queued || stopped) return;
+      ref.queued = true;
+      ref.thumb.classList.add('loading');
+      ref.thumb.innerHTML = '<span class="dp-spin"></span>';
+      queue.push(ref);
+      pump();
+    };
+    const pump = async ()=>{
+      if(pumping) return;
+      pumping = true;
+      try {
+        while(queue.length){
+          if(token !== dirPickerToken || stopped) return;
+          const ref = queue.shift()!;
+          const result = await makeFileThumbnail(ref.item.file, ref.item.path, token, meshes);
+          if(token !== dirPickerToken) return;
+          ref.done = true;
+          ref.thumb.classList.remove('loading');
+          if(result.url){
+            const img = document.createElement('img'); img.src = result.url; img.alt = base(ref.item.path);
+            ref.thumb.textContent = ''; ref.thumb.append(img);
+          } else {
+            ref.thumb.textContent = ''; ref.thumb.classList.add('noimg');
+            setThumbMessage(ref.thumb, result.message || 'プレビュー不可');
+          }
+          await nextFrame();
+        }
+      } finally { pumping = false; }
+    };
+    const io = new IntersectionObserver(entries=>{
+      for(const e of entries){
+        if(!e.isIntersecting) continue;
+        const ref = cardByEl.get(e.target);
+        if(ref) enqueue(ref);
+        io.unobserve(e.target);
+      }
+    }, { root:null, rootMargin:'200px' });
+
+    // --- 一覧（リスト／ギャラリー共通のカード。CSS クラスで見た目を切り替える）---
+    let view: PickerView = loadPickerView(modelFiles.length);
+    const grid = document.createElement('div'); grid.className = `dp-grid ${view === 'list' ? 'list' : 'gallery'}`;
+    const cardByPath = new Map<string, CardRef>();
     for(const item of modelFiles){
       const ext = item.file.name.split('.').pop()!.toLowerCase();
       const card = document.createElement('label'); card.className = 'dp-card'; card.title = item.path;
-      const thumb = document.createElement('div'); thumb.className = 'dp-thumb loading';
-      thumb.innerHTML = '<span class="dp-spin"></span>';
+      const thumb = document.createElement('div'); thumb.className = 'dp-thumb';
       const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'dp-check';
       cb.checked = selected.has(item.path);
       if(cb.checked) card.classList.add('sel');
@@ -1539,9 +1684,14 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
       const nm = document.createElement('div'); nm.className = 'dp-name'; nm.textContent = base(item.path);
       const sub = document.createElement('div'); sub.className = 'dp-sub';
       sub.textContent = `${ext.toUpperCase()} · ${fmtBytes(item.file.size)}`;
-      card.append(cb, thumb, nm, sub);
+      const meta = document.createElement('div'); meta.className = 'dp-meta'; meta.append(nm, sub);
+      card.append(cb, thumb, meta);
       grid.append(card);
-      cardByPath.set(item.path, { thumb, cb });
+      const ref: CardRef = { thumb, cb, item, done:false, queued:false };
+      cardByPath.set(item.path, ref);
+      // 見えているカードだけを順にプレビューする（数百件でも初期表示が固まらない）。
+      cardByEl.set(card, ref);
+      io.observe(card);
     }
 
     // --- ヘッダ・ツール・フッタ ---
@@ -1549,7 +1699,7 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
     const head = document.createElement('div'); head.className = 'dp-head';
     const title = document.createElement('div'); title.className = 'dp-title'; title.textContent = '表示するモデルを選択';
     const hsub = document.createElement('div'); hsub.className = 'dp-hsub';
-    hsub.textContent = `${handle.name} · ${modelFiles.length} 件`; hsub.title = handle.name;
+    hsub.textContent = `${label} · ${modelFiles.length} 件`; hsub.title = label;
     const closeBtn = document.createElement('button'); closeBtn.className = 'dp-close'; closeBtn.textContent = '×'; closeBtn.title = 'キャンセル';
     closeBtn.onclick = ()=> finish(null);
     head.append(title, hsub, closeBtn);
@@ -1570,16 +1720,31 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
     allBtn.onclick = ()=> setAll(true);
     noneBtn.onclick = ()=> setAll(false);
     stopPreviewBtn.onclick = ()=>{
-      if(token !== dirPickerToken) return;
-      dirPickerToken++;
+      stopped = true;
+      queue.length = 0;
+      io.disconnect();
       stopPreviewBtn.disabled = true;
       for(const ref of cardByPath.values()){
-        if(ref.thumb.classList.contains('loading')) setThumbMessage(ref.thumb, 'プレビュー停止');
+        if(ref.thumb.classList.contains('loading')){ ref.thumb.classList.remove('loading'); setThumbMessage(ref.thumb, 'プレビュー停止'); }
       }
     };
+    // リスト⇄ギャラリー切替。選んだ形式は次回以降も引き継ぐ。
+    const viewBtn = document.createElement('button'); viewBtn.className = 'dp-tool';
+    const syncViewBtn = ()=>{
+      grid.classList.toggle('list', view === 'list');
+      grid.classList.toggle('gallery', view === 'grid');
+      viewBtn.textContent = view === 'list' ? 'ギャラリー表示' : 'リスト表示';
+      viewBtn.title = view === 'list' ? 'サムネイルを大きく並べる' : '一行ずつのリストにする';
+    };
+    viewBtn.onclick = ()=>{
+      view = view === 'list' ? 'grid' : 'list';
+      localStorage.setItem(PICKER_VIEW_KEY, view);
+      syncViewBtn();
+    };
+    syncViewBtn();
     const toolHint = document.createElement('span'); toolHint.className = 'dp-toolhint';
-    toolHint.textContent = '大きいSTLは軽量サンプル、重い形式はプレビュー省略。';
-    tools.append(allBtn, noneBtn, stopPreviewBtn, toolHint);
+    toolHint.textContent = 'プレビューは画面に見えている分から作ります。大きいSTLは軽量サンプル、重い形式は省略。';
+    tools.append(allBtn, noneBtn, viewBtn, stopPreviewBtn, toolHint);
 
     const foot = document.createElement('div'); foot.className = 'dp-foot';
     countLabel.className = 'dp-count';
@@ -1595,27 +1760,7 @@ async function openDirectoryPicker(handle: FileSystemDirectoryHandle, preselecte
     dirPicker.onclick = (e)=>{ if(e.target === dirPicker) finish(null); };
     dirPicker.textContent = ''; dirPicker.append(panel); dirPicker.classList.add('show');
 
-    // サムネイルを1枚ずつ生成（順次・UIを止めない）。token が変われば打ち切る。
-    // 大容量ファイルは解析コストが高いので、プレビュー生成をスキップして選択だけ可能にする。
-    (async ()=>{
-      for(const item of modelFiles){
-        if(token !== dirPickerToken) return;
-        const result = await makeFileThumbnail(item.file, item.path, token, meshes);
-        if(token !== dirPickerToken) return;
-        const ref = cardByPath.get(item.path);
-        if(!ref) continue;
-        ref.thumb.classList.remove('loading');
-        if(result.url){
-          const img = document.createElement('img'); img.src = result.url; img.alt = base(item.path);
-          ref.thumb.textContent = ''; ref.thumb.append(img);
-        } else {
-          ref.thumb.textContent = ''; ref.thumb.classList.add('noimg');
-          setThumbMessage(ref.thumb, result.message || 'プレビュー不可');
-        }
-        await nextFrame();
-      }
-      stopPreviewBtn.disabled = true;
-    })();
+    // プレビューは IntersectionObserver 経由で、見えているカードから順に作られる。
   });
 }
 
